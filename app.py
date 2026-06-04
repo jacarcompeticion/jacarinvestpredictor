@@ -134,7 +134,7 @@ def procesar_bloque_activos(lista_tickers):
     for ticker in lista_tickers:
         try:
             t = yf.Ticker(ticker, session=session)
-            df_hist = t.history(period="9mo") # Extraemos datos suficientes para el indicador de 100 periodos
+            df_hist = t.history(period="9mo")
             
             if df_hist.empty or len(df_hist) < 50: continue
             
@@ -145,14 +145,13 @@ def procesar_bloque_activos(lista_tickers):
             
             # --- EVALUACIÓN SEÑAL TÉCNICA (BOLLINGER SQUEEZE) ---
             if es_squeeze and p_boll >= min_probabilidad:
-                # Si el RSI está bajo, priorizamos CALL; si está alto, PUT. Si está en medio, abrimos CALL de cobertura.
                 tipo = "CALL" if rsi <= 50 else "PUT"
                 X = round(S * 1.03, 2) if tipo == "CALL" else round(S * 0.97, 2)
                 prima_teorica = calcular_precio_teorico_call(S, X, T, tasa_interes, vol) if tipo == "CALL" else calcular_precio_teorico_put(S, X, T, tasa_interes, vol)
                 
                 alertas.append({
                     "Estrategia": "Opción Técnica (Bollinger)",
-                    "Prob. Acierto": f"{p_boll}%",
+                    "Prob. Acierto": p_boll, # <--- CORREGIDO: Guardamos el número puro para el degradado
                     "Activo": ticker,
                     "Orden Ejecución Sugerida": f"Comprar {tipo} de Strike {X} con vencimiento {vencimiento_lejano}. [TP: +20% | SL: -10%]",
                     "Precio Estimado Prima": f"{prima_teorica:.2f} $"
@@ -166,18 +165,23 @@ def procesar_bloque_activos(lista_tickers):
                 
                 alertas.append({
                     "Estrategia": "Opción Estadística (RSI)",
-                    "Prob. Acierto": f"{p_rsi}%",
+                    "Prob. Acierto": p_rsi, # <--- CORREGIDO: Guardamos el número puro para el degradado
                     "Activo": ticker,
                     "Orden Ejecución Sugerida": f"Comprar {tipo} de Strike {X} con vencimiento {vencimiento_lejano}. [TP: +20% | SL: -10%]",
                     "Precio Estimado Prima": f"{prima_teorica:.2f} $"
                 })
                 
         except Exception as e:
-            continue # Evita que un bloqueo en un ticker rompa todo el escáner de la pestaña
+            continue
             
     if alertas:
         df_mostrar = pd.DataFrame(alertas)
-        st.dataframe(df_mostrar.style.background_gradient(cmap="Greens", subset=["Prob. Acierto"]), use_container_width=True)
+        # Formateamos la columna en el render para que muestre el "%" visualmente sin romper la matemática
+        st.dataframe(
+            df_mostrar.style.background_gradient(cmap="Greens", subset=["Prob. Acierto"])
+                            .format({"Prob. Acierto": "{:.1f}%"}), 
+            use_container_width=True
+        )
     else:
         st.info("☕ Analizando el mercado... No se localizan ineficiencias con la probabilidad mínima exigida en este bloque.")
 
