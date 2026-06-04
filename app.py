@@ -28,39 +28,7 @@ def enviar_alerta_telegram(mensaje):
             except: pass
 
 # =====================================================================
-# PANEL DE CONTROL DE POSICIONES ABIERTAS (Tu supervisor de XTB)
-# =====================================================================
-st.sidebar.header("🗂️ Registrar Posición Abierta en XTB")
-with st.sidebar.form("form_posicion"):
-    ticker_activo = st.text_input("Ticker (Ej: PFE)").upper()
-    tipo_op = st.selectbox("Tipo", ["CALL", "PUT"])
-    precio_ent = st.number_input("Precio Entrada Prima ($)", value=0.0, step=0.05)
-    guardar_pos = st.form_submit_button("🚨 Registrar y Vigilar")
-
-if "posiciones" not in st.session_state:
-    st.session_state.posiciones = []
-
-if guardar_pos and ticker_activo and precio_ent > 0:
-    tp_calc = round(precio_ent * 1.20, 2)
-    sl_calc = round(precio_ent * 0.90, 2)
-    
-    st.session_state.posiciones.append({
-        "Ticker": ticker_activo, "Tipo": tipo_op, "Entrada": precio_ent, "TP": tp_calc, "SL": sl_calc
-    })
-    
-    mensaje_apertura = (
-        f"🚀 *JACARINVEST: POSICIÓN ABIERTA* 🚀\n\n"
-        f"🔹 *Activo:* {ticker_activo} ({tipo_op})\n"
-        f"📥 *Precio de Entrada:* {precio_ent:.2f} $\n"
-        f"🎯 *Objetivo Take Profit (+20%):* {tp_calc:.2f} $\n"
-        f"🛡️ *Límite Stop Loss (-10%):* {sl_calc:.2f} $\n\n"
-        f"⚙️ _El sistema se queda vigilando este activo en la nube._"
-    )
-    enviar_alerta_telegram(mensaje_apertura)
-    st.sidebar.success(f"🟢 ¡Vigilando {ticker_activo}! Confirmación enviada a Telegram.")
-
-# =====================================================================
-# MOTOR MATEMÁTICO QUANT
+# MOTOR MATEMÁTICO QUANT (BLACK-SCHOLES COMPLETO)
 # =====================================================================
 def calcular_precio_teorico_call(S, X, T, r, sigma):
     if T <= 0 or sigma <= 0: return max(0.0, S - X)
@@ -131,68 +99,106 @@ def calcular_indicadores_y_backtest(df_historico, r_interes):
     return precio_actual, rsi_actual, es_squeeze, vol_historica, round(prob_bollinger, 1), round(prob_rsi, 1)
 
 # =====================================================================
+# PANEL DE CONTROL DE POSICIONES ABIERTAS (Tu supervisor de XTB)
+# =====================================================================
+st.sidebar.header("🗂️ Registrar Posición Abierta en XTB")
+with st.sidebar.form("form_posicion"):
+    ticker_activo = st.text_input("Ticker (Ej: PFE)").upper()
+    tipo_op = st.selectbox("Tipo", ["CALL", "PUT"])
+    strike_op = st.number_input("Strike Seleccionado ($)", value=0.0, step=0.5) # NUEVO: Guardamos el Strike para recalcular
+    precio_ent = st.number_input("Precio Entrada Prima ($)", value=0.0, step=0.05)
+    guardar_pos = st.form_submit_button("🚨 Registrar y Vigilar")
+
+if "posiciones" not in st.session_state:
+    st.session_state.posiciones = []
+
+if guardar_pos and ticker_activo and precio_ent > 0 and strike_op > 0:
+    tp_calc = round(precio_ent * 1.20, 2)
+    sl_calc = round(precio_ent * 0.90, 2)
+    
+    st.session_state.posiciones.append({
+        "Ticker": ticker_activo,
+        "Tipo": tipo_op,
+        "Strike": strike_op,
+        "Entrada": precio_ent,
+        "TP": tp_calc,
+        "SL": sl_calc
+    })
+    
+    mensaje_apertura = (
+        f"🚀 *JACARINVEST: POSICIÓN ABIERTA* 🚀\n\n"
+        f"🔹 *Activo:* {ticker_activo} ({tipo_op})\n"
+        f"🎯 *Strike:* {strike_op:.2f} $\n"
+        f"📥 *Precio de Entrada:* {precio_ent:.2f} $\n"
+        f"🎯 *Objetivo Take Profit (+20%):* {tp_calc:.2f} $\n"
+        f"🛡️ *Límite Stop Loss (-10%):* {sl_calc:.2f} $\n\n"
+        f"⚙️ _El sistema se queda vigilando este activo de forma matemática._"
+    )
+    enviar_alerta_telegram(mensaje_apertura)
+    st.sidebar.success(f"🟢 ¡Vigilando {ticker_activo}! Confirmación enviada.")
+
+# =====================================================================
 # INTERFAZ PRINCIPAL
 # =====================================================================
-st.title("🎯 JacarInvest Scout: Buscador de Gangas de Opciones")
-st.markdown("Filtros de volatilidad, reversión estadística y supervisor de cierres manuales con alertas automáticas.")
+tasa_interes = 0.045
 
-# Monitor de posiciones activas en la parte superior
+# Monitor de posiciones activas recalculado por Black-Scholes
 if st.session_state.posiciones:
-    st.subheader("🕵️ Monitor de Posiciones en Tiempo Real")
+    st.subheader("🕵️ Monitor de Posiciones en Tiempo Real (Black-Scholes Engine)")
     for pos in st.session_state.posiciones:
         try:
             ticker_yf = yf.Ticker(pos["Ticker"])
-            hist_reciente = ticker_yf.history(period="5d")
-            p_actual_accion = hist_reciente["Close"].iloc[-1]
-            p_previo_accion = hist_reciente["Close"].iloc[-2]
-            cambio_pct = (p_actual_accion - p_previo_accion) / p_previo_accion
+            df_hist_reciente = ticker_yf.history(period="3mo")
             
-            prima_estimada_actual = pos["Entrada"] * (1 + (cambio_pct * 5 if pos["Tipo"] == "CALL" else -cambio_pct * 5))
+            # Recalculamos la volatilidad histórica real de la acción
+            df_hist_reciente['Retornos'] = df_hist_reciente['Close'].pct_change()
+            vol_actual = df_hist_reciente['Retornos'].rolling(window=20).std().iloc[-1] * np.sqrt(252)
+            if np.isnan(vol_actual) or vol_actual <= 0: vol_actual = 0.30
+            
+            p_actual_accion = df_hist_reciente["Close"].iloc[-1]
+            T_restante = 35 / 365.0  # Aproximación temporal estándar
+            
+            # --- CORRECCIÓN CRÍTICA: RECALCULO CIENTÍFICO DE LA PRIMA ---
+            if pos["Tipo"] == "CALL":
+                prima_estimada_actual = calcular_precio_teorico_call(p_actual_accion, pos["Strike"], T_restante, tasa_interes, vol_actual)
+            else:
+                prima_estimada_actual = calcular_precio_teorico_put(p_actual_accion, pos["Strike"], T_restante, tasa_interes, vol_actual)
+            
             prima_estimada_actual = max(0.01, round(prima_estimada_actual, 2))
+            rendimiento_pct = ((prima_estimada_actual - pos["Entrada"]) / pos["Entrada"]) * 100
             
             col1, col2, col3, col4 = st.columns(4)
-            col1.metric(f"{pos['Ticker']} ({pos['Tipo']})", f"Prima Est: {prima_estimada_actual} $", f"{((prima_estimada_actual-pos['Entrada'])/pos['Entrada'])*100:.1f}%")
+            col1.metric(f"{pos['Ticker']} ({pos['Tipo']}) - Strike {pos['Strike']}", f"Prima Real Est: {prima_estimada_actual} $", f"{rendimiento_pct:.1f}%")
             col2.write(f"📥 Entrada: {pos['Entrada']} $")
             col3.write(f"🟢 Objetivo TP: {pos['TP']} $")
             col4.write(f"🔴 Salida SL: {pos['SL']} $")
             
             if prima_estimada_actual >= pos["TP"]:
-                enviar_alerta_telegram(f"🚨 *JACARINVEST: TAKE PROFIT* 🚨\n\nEl activo *{pos['Ticker']}* llegó al objetivo del *+20%*.\nPrima: {prima_estimada_actual}$. ¡Cierra en XTB!")
+                enviar_alerta_telegram(
+                    f"🚨 *JACARINVEST: ALERTA DE VENTA (TAKE PROFIT)* 🚨\n\n"
+                    f"💰 El activo *{pos['Ticker']}* ha alcanzado el objetivo del *+20%*.\n"
+                    f"📊 Prima recalculada por Black-Scholes: {prima_estimada_actual:.2f} $.\n\n"
+                    f"📥 _Cierra la posición manualmente en XTB para consolidar las ganancias._"
+                )
             elif prima_estimada_actual <= pos["SL"]:
-                enviar_alerta_telegram(f"📉 *JACARINVEST: STOP LOSS* 📉\n\nEl activo *{pos['Ticker']}* tocó el suelo de seguridad del *-10%*.\nPrima: {prima_estimada_actual}$. ¡Cierra en XTB!")
+                enviar_alerta_telegram(
+                    f"📉 *JACARINVEST: ALERTA DE CIERRE (STOP LOSS)* 📉\n\n"
+                    f"⚠️ El activo *{pos['Ticker']}* ha roto el suelo del *-10%*.\n"
+                    f"📊 Prima recalculada por Black-Scholes: {prima_estimada_actual:.2f} $.\n\n"
+                    f"📥 _Ejecuta el cierre manual en XTB para proteger tu capital._"
+                )
         except: continue
     st.divider()
 
-# =====================================================================
-# LISTA COMPLETA Y OFICIAL DE VALORES CON OPCIONES EN XTB
-# =====================================================================
-grandes_corporaciones = [
-    "AAPL", "NVDA", "TSLA", "MSFT", "V", "UPS", "PFE", "XOM", "META", "AMZN", 
-    "GOOGL", "NFLX", "DIS", "KO", "PEP", "JPM", "BAC", "WMT", "DIS", "INTC", 
-    "AMD", "ASML", "SAP", "ORAC", "LVMH.PA", "MC.PA"
-]
+# Listas de activos oficiales de XTB
+grandes_corporaciones = ["AAPL", "NVDA", "TSLA", "MSFT", "V", "UPS", "PFE", "XOM", "META", "AMZN", "GOOGL", "NFLX", "DIS", "KO", "PEP", "JPM", "BAC", "WMT", "INTC", "AMD", "ASML", "SAP", "LVMH.PA", "MC.PA"]
+mid_small_caps = ["DRTS", "ATEN", "ADEA", "PLTR", "SOUN", "BABA", "MARA", "RIOT", "BBAI", "NIO", "HOOD", "LCID", "CHPT", "RIVN", "AAL", "DAL", "UAL", "SNAP", "PINS", "DKNG", "COIN", "XPEV", "LI", "F", "GM"]
+indices_materias = ["SPY", "QQQ", "IWM", "USO", "GLD", "IBIT", "SLV", "TLT", "UNG", "FXE", "UUP", "EEM", "EFA", "GDX", "XLE", "XLF", "XLK", "XLY", "XLI"]
 
-mid_small_caps = [
-    "DRTS", "ATEN", "ADEA", "PLTR", "SOUN", "BABA", "MARA", "RIOT", "BBAI", 
-    "NIO", "HOOD", "LCID", "CHPT", "RIVN", "AAL", "DAL", "UAL", "SNAP", 
-    "PINS", "DKNG", "COIN", "XPEV", "LI", "F", "GM"
-]
-
-indices_materias = [
-    "SPY", "QQQ", "IWM", "USO", "GLD", "IBIT", "SLV", "TLT", "UNG", "FXE", 
-    "UUP", "EEM", "EFA", "GDX", "XLE", "XLF", "XLK", "XLY", "XLI"
-]
-
-# Unificación absoluta para la ventana global
 todos_los_activos_xtb = grandes_corporaciones + mid_small_caps + indices_materias
-tasa_interes = 0.045
 
-# Ventanas estructuradas
 pestana_top, pestana1, pestana2, pestana3 = st.tabs([
-    "👑 Las 10 Mejores Gangas (Catálogo XTB)",
-    "🏢 Grandes Corporaciones", 
-    "🚀 Mid & Small Caps", 
-    "🌍 Divisas, Índices y Materias"
+    "👑 Las 10 Mejores Gangas (Catálogo XTB)", "🏢 Grandes Corporaciones", "🚀 Mid & Small Caps", "🌍 Divisas, Índices y Materias"
 ])
 
 session = requests.Session()
@@ -232,37 +238,29 @@ def obtener_alertas_bloque(lista_tickers):
         except: continue
     return resultados
 
-# Ejecución de lógica por ventanas independientes
+# Lógica de pestañas
 with pestana_top:
     st.subheader("👑 El TOP 10 Absoluto Filtrado por Disponibilidad XTB")
-    st.markdown("Esta ventana unifica el escaneo completo analizando en paralelo los más de 65 activos negociables mediante opciones Vanilla en XTB.")
     if st.button("🚀 Lanzar Súper-Escáner Global", key="btn_super_top"):
-        with st.spinner("Filtrando el catálogo completo de opciones de XTB en tiempo real..."):
+        with st.spinner("Filtrando el catálogo completo de opciones de XTB..."):
             alertas_globales = obtener_alertas_bloque(todos_los_activos_xtb)
             if alertas_globales:
                 df_global = pd.DataFrame(alertas_globales)
                 df_top10 = df_global.sort_values(by="Éxito Histórico Num", ascending=False).head(10)
-                df_top10 = df_top10.drop(columns=["Éxito Histórico Num"])
-                st.dataframe(df_top10, use_container_width=True)
-            else:
-                st.info("☕ No se localizan ineficiencias críticas con opciones en XTB en este momento.")
+                st.dataframe(df_top10.drop(columns=["Éxito Histórico Num"]), use_container_width=True)
+            else: st.info("☕ No se localizan ineficiencias críticas.")
 
 with pestana1:
-    st.subheader("🏢 Escáner de Blue Chips e Inversiones Nobles")
     if st.button("🔍 Escanear Grandes Corporaciones", key="btn_grandes"):
         res = obtener_alertas_bloque(grandes_corporaciones)
         if res: st.dataframe(pd.DataFrame(res).drop(columns=["Éxito Histórico Num"]), use_container_width=True)
         else: st.info("☕ No se localizan señales.")
-
 with pestana2:
-    st.subheader("🚀 Escáner de Small & Mid Caps (Contratos Baratos de Alto Impulso)")
     if st.button("🔍 Escanear Mid & Small Caps", key="btn_small"):
         res = obtener_alertas_bloque(mid_small_caps)
         if res: st.dataframe(pd.DataFrame(res).drop(columns=["Éxito Histórico Num"]), use_container_width=True)
         else: st.info("☕ No se localizan señales.")
-
 with pestana3:
-    st.subheader("🌍 Escáner de Divisas, Índices y Materias Primas")
     if st.button("🔍 Escanear Bloque Macro", key="btn_indices"):
         res = obtener_alertas_bloque(indices_materias)
         if res: st.dataframe(pd.DataFrame(res).drop(columns=["Éxito Histórico Num"]), use_container_width=True)
