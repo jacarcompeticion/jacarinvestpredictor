@@ -13,17 +13,22 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Configuración del bot de Telegram en la barra lateral para las alertas en el móvil
-st.sidebar.header("📢 Configuración de Alertas Móviles")
-telegram_token = st.sidebar.text_input("8236836852:AAF1ILMLRUmQI2axjyDqlRomCON7CahAJCU")
-telegram_chat_id = st.sidebar.text_input("1296326413")
+# =====================================================================
+# CONFIGURACIÓN FIJA DE TELEGRAM (CREDENCIALES AUTOMÁTICAS)
+# =====================================================================
+TELEGRAM_BOT_TOKEN = "8236836852:AAF1ILMLRUmQI2axjyDqlRomCON7CahAJCU"
+USER_CHAT_IDS = [1296326413]
 
 def enviar_alerta_telegram(mensaje):
-    if telegram_token and telegram_chat_id:
-        url = f"https://api.telegram.org/bot{telegram_token}/sendMessage"
-        payload = {"chat_id": telegram_chat_id, "text": mensaje}
-        try: requests.post(url, json=payload)
-        except: pass
+    """Envía la notificación a todos los Chat IDs configurados en la lista"""
+    if TELEGRAM_BOT_TOKEN and USER_CHAT_IDS:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        for chat_id in USER_CHAT_IDS:
+            payload = {"chat_id": chat_id, "text": mensaje, "parse_mode": "Markdown"}
+            try: 
+                requests.post(url, json=payload)
+            except: 
+                pass
 
 # =====================================================================
 # PANEL DE CONTROL DE POSICIONES ABIERTAS (Tu supervisor de XTB)
@@ -39,17 +44,32 @@ if "posiciones" not in st.session_state:
     st.session_state.posiciones = []
 
 if guardar_pos and ticker_activo and precio_ent > 0:
+    tp_calc = round(precio_ent * 1.20, 2)
+    sl_calc = round(precio_ent * 0.90, 2)
+    
+    # Guardamos la posición en la memoria local del robot
     st.session_state.posiciones.append({
         "Ticker": ticker_activo,
         "Tipo": tipo_op,
         "Entrada": precio_ent,
-        "TP": round(precio_ent * 1.20, 2),
-        "SL": round(precio_ent * 0.90, 2)
+        "TP": tp_calc,
+        "SL": sl_calc
     })
-    st.sidebar.success(f"Vigilando {ticker_activo}...")
+    
+    # --- MENSAJE 1: NOTIFICACIÓN DE APERTURA EXITOSA (MÓVIL) ---
+    mensaje_apertura = (
+        f"🚀 *JACARINVEST: POSICIÓN ABIERTA* 🚀\n\n"
+        f"🔹 *Activo:* {ticker_activo} ({tipo_op})\n"
+        f"📥 *Precio de Entrada:* {precio_ent:.2f} $\n"
+        f"🎯 *Objetivo Take Profit (+20%):* {tp_calc:.2f} $\n"
+        f"🛡️ *Límite Stop Loss (-10%):* {sl_calc:.2f} $\n\n"
+        f"⚙️ _El sistema se queda vigilando este activo en la nube._"
+    )
+    enviar_alerta_telegram(mensaje_apertura)
+    st.sidebar.success(f"🟢 ¡Vigilando {ticker_activo}! Confirmación enviada a Telegram.")
 
 # =====================================================================
-# MOTOR MATEMÁTICO QUANT
+# MOTOR MATEMÁTICO QUANT (BLACK-SCHOLES & HISTÓRICO)
 # =====================================================================
 def calcular_precio_teorico_call(S, X, T, r, sigma):
     if T <= 0 or sigma <= 0: return max(0.0, S - X)
@@ -120,10 +140,10 @@ def calcular_indicadores_y_backtest(df_historico, r_interes):
     return precio_actual, rsi_actual, es_squeeze, vol_historica, round(prob_bollinger, 1), round(prob_rsi, 1)
 
 # =====================================================================
-# INTERFAZ PRINCIPAL
+# INTERFAZ PRINCIPAL DENTRO DE STREAMLIT
 # =====================================================================
 st.title("🎯 JacarInvest Scout: Buscador de Gangas de Opciones")
-st.markdown("Filtros de volatilidad, reversión estadística y supervisor de cierres manuales para XTB.")
+st.markdown("Filtros de volatilidad, reversión estadística y supervisor de cierres manuales con alertas automáticas integradas.")
 
 # Monitor de posiciones activas en la parte superior
 if st.session_state.posiciones:
@@ -132,12 +152,10 @@ if st.session_state.posiciones:
         try:
             ticker_yf = yf.Ticker(pos["Ticker"])
             hist_reciente = ticker_yf.history(period="5d")
-            # En un entorno real aproximamos la variación de la prima basándonos en el cambio de la acción
             p_actual_accion = hist_reciente["Close"].iloc[-1]
             p_previo_accion = hist_reciente["Close"].iloc[-2]
             cambio_pct = (p_actual_accion - p_previo_accion) / p_previo_accion
             
-            # Estimación de la variación de la prima (Efecto apalancamiento x5 aproximado)
             prima_estimada_actual = pos["Entrada"] * (1 + (cambio_pct * 5 if pos["Tipo"] == "CALL" else -cambio_pct * 5))
             prima_estimada_actual = max(0.01, round(prima_estimada_actual, 2))
             
@@ -147,14 +165,25 @@ if st.session_state.posiciones:
             col3.write(f"🟢 Objetivo TP: {pos['TP']} $")
             col4.write(f"🔴 Salida SL: {pos['SL']} $")
             
-            # Lanzamiento de notificaciones automáticas al móvil
+            # --- MENSAJE 2: NOTIFICACIÓN DE CIERRE AUTOMÁTICA (MÓVIL) ---
             if prima_estimada_actual >= pos["TP"]:
-                enviar_alerta_telegram(f"🚨 ALERTAS JACARINVEST 🚨\n{pos['Ticker']} {pos['Tipo']} ha tocado el TAKE PROFIT (+20%). Prima actual est: {prima_estimada_actual}$. ¡CIERRA LA POSICIÓN EN XTB!")
+                enviar_alerta_telegram(
+                    f"🚨 *JACARINVEST: ALERTA DE VENTA (TAKE PROFIT)* 🚨\n\n"
+                    f"💰 El activo *{pos['Ticker']}* ha alcanzado el objetivo de rentabilidad del *+20%*.\n"
+                    f"📊 Prima estimada actual: {prima_estimada_actual:.2f} $ (Entrada: {pos['Entrada']:.2f} $).\n\n"
+                    f"📥 _Entra en tu cuenta de XTB ahora mismo y presiona CERRAR POSICIÓN._"
+                )
             elif prima_estimada_actual <= pos["SL"]:
-                enviar_alerta_telegram(f"📉 ALERTAS JACARINVEST 📉\n{pos['Ticker']} {pos['Tipo']} ha tocado el STOP LOSS (-10%). Prima actual est: {prima_estimada_actual}$. ¡Corta pérdidas en XTB!")
+                enviar_alerta_telegram(
+                    f"📉 *JACARINVEST: ALERTA DE CIERRE (STOP LOSS)* 📉\n\n"
+                    f"⚠️ El activo *{pos['Ticker']}* ha tocado el límite de pérdidas de seguridad del *-10%*.\n"
+                    f"📊 Prima estimada actual: {prima_estimada_actual:.2f} $ (Entrada: {pos['Entrada']:.2f} $).\n\n"
+                    f"📥 _Entra en tu cuenta de XTB y ejecuta el cierre manual para proteger tu capital._"
+                )
         except: continue
     st.divider()
 
+# Listas de activos
 grandes_corporaciones = ["AAPL", "NVDA", "TSLA", "MSFT", "V", "UPS", "PFE", "XOM", "META", "AMZN", "GOOGL", "NFLX", "DIS", "KO", "PEP"]
 mid_small_caps = ["DRTS", "ATEN", "ADEA", "PLTR", "SOUN", "BABA", "MARA", "RIOT", "BBAI", "NIO", "HOOD", "LCID", "CHPT", "RIVN"]
 indices_materias = ["SPY", "QQQ", "IWM", "USO", "GLD", "IBIT", "SLV", "TLT", "UNG", "FXE", "UUP"]
