@@ -33,10 +33,6 @@ def calcular_precio_teorico_put(S, X, T, r, sigma):
     except: return max(0.0, X - S)
 
 def calcular_indicadores_y_backtest(df_historico, r_interes):
-    """
-    Ejecuta el cálculo analítico de Bollinger Squeeze, RSI 
-    y evalúa la probabilidad de éxito histórica para un objetivo del +20% en 7 días.
-    """
     df = df_historico.copy()
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['STD20'] = df['Close'].rolling(window=20).std()
@@ -97,13 +93,13 @@ def calcular_indicadores_y_backtest(df_historico, r_interes):
 # MÓDULO 2: INTERFAZ GRÁFICA MULTI-VENTANA (STREAMLIT)
 # =====================================================================
 st.title("🎯 JacarInvest Scout: Buscador de Gangas de Opciones")
-st.markdown("Filtros simultáneos basados en volatilidad comprimida, reversión estadística y micro-backtesting en tiempo real.")
+st.markdown("Filtros simultáneos basados en volatilidad comprimida, reversión estadística y micro-backtesting en tiempo real con cálculo automático de objetivos.")
 st.divider()
 
-# Definición de las listas de activos
-grandes_corporaciones = ["AAPL", "NVDA", "TSLA", "MSFT", "V", "UPS", "PFE", "XOM"]
-mid_small_caps = ["DRTS", "ATEN", "ADEA", "PLTR", "SOUN", "BABA"]
-indices_materias = ["SPY", "QQQ", "IWM", "USO", "GLD", "IBIT"]
+# LISTAS AMPLIADAS DE ACTIVOS (Más opciones en cada ventana)
+grandes_corporaciones = ["AAPL", "NVDA", "TSLA", "MSFT", "V", "UPS", "PFE", "XOM", "META", "AMZN", "GOOGL", "NFLX", "DIS", "KO", "PEP"]
+mid_small_caps = ["DRTS", "ATEN", "ADEA", "PLTR", "SOUN", "BABA", "MARA", "RIOT", "BBAI", "NIO", "HOOD", "LCID", "CHPT", "RIVN"]
+indices_materias = ["SPY", "QQQ", "IWM", "USO", "GLD", "IBIT", "SLV", "TLT", "UNG", "FXE", "UUP"]
 
 # Barra lateral de configuración global
 st.sidebar.header("⚙️ Parámetros Globales")
@@ -143,12 +139,18 @@ def procesar_bloque_activos(lista_tickers):
                 X = round(S * 1.03, 2) if tipo == "CALL" else round(S * 0.97, 2)
                 prima_teorica = calcular_precio_teorico_call(S, X, T, tasa_interes, vol) if tipo == "CALL" else calcular_precio_teorico_put(S, X, T, tasa_interes, vol)
                 
+                # CÁLCULO NUMÉRICO DE OBJETIVOS AUTOMÁTICOS
+                tp_numerico = prima_teorica * 1.20
+                sl_numerico = prima_teorica * 0.90
+                
                 alertas.append({
                     "Activo": ticker,
                     "Estrategia": "Técnica (Bollinger Squeeze)",
                     "Éxito Histórico": f"{p_boll}%",
-                    "Orden de Ejecución": f"Comprar {tipo} de Strike {X} con vencimiento {vencimiento_lejano}. [TP: +20% | SL: -10%]",
-                    "Prima Est.": f"{prima_teorica:.2f} $"
+                    "Orden de Operación": f"Comprar {tipo} Strike {X} Vencimiento {vencimiento_lejano}",
+                    "Precio Entrada (Prima)": f"{prima_teorica:.2f} $",
+                    "TAKE PROFIT SUGERIDO (+20%)": f"{tp_numerico:.2f} $",
+                    "STOP LOSS SUGERIDO (-10%)": f"{sl_numerico:.2f} $"
                 })
                 
             # --- EVALUACIÓN SEÑAL ESTADÍSTICA (REVERSIÓN RSI) ---
@@ -157,12 +159,18 @@ def procesar_bloque_activos(lista_tickers):
                 X = round(S * 1.02, 2) if tipo == "CALL" else round(S * 0.98, 2)
                 prima_teorica = calcular_precio_teorico_call(S, X, T, tasa_interes, vol) if tipo == "CALL" else calcular_precio_teorico_put(S, X, T, tasa_interes, vol)
                 
+                # CÁLCULO NUMÉRICO DE OBJETIVOS AUTOMÁTICOS
+                tp_numerico = prima_teorica * 1.20
+                sl_numerico = prima_teorica * 0.90
+                
                 alertas.append({
                     "Activo": ticker,
                     "Estrategia": "Estadística (RSI)",
                     "Éxito Histórico": f"{p_rsi}%",
-                    "Orden de Ejecución": f"Comprar {tipo} de Strike {X} con vencimiento {vencimiento_lejano}. [TP: +20% | SL: -10%]",
-                    "Prima Est.": f"{prima_teorica:.2f} $"
+                    "Orden de Operación": f"Comprar {tipo} Strike {X} Vencimiento {vencimiento_lejano}",
+                    "Precio Entrada (Prima)": f"{prima_teorica:.2f} $",
+                    "TAKE PROFIT SUGERIDO (+20%)": f"{tp_numerico:.2f} $",
+                    "STOP LOSS SUGERIDO (-10%)": f"{sl_numerico:.2f} $"
                 })
                 
         except Exception as e:
@@ -170,7 +178,6 @@ def procesar_bloque_activos(lista_tickers):
             
     if alertas:
         df_mostrar = pd.DataFrame(alertas)
-        # Mostrar tabla limpia sin estilos complejos de gradientes para evitar errores de Matplotlib
         st.dataframe(df_mostrar, use_container_width=True)
     else:
         st.info("☕ Analizando el mercado... No se localizan señales de compresión o RSI en este momento para este bloque.")
