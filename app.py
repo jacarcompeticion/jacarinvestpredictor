@@ -1,13 +1,3 @@
-¡Tienes toda la razón! Se me pasó por completo el matiz más importante: la lista global que estábamos usando en el código era solo nuestra selección previa de 40 activos, pero XTB ofrece un catálogo oficial cerrado de opciones Vanilla que incluye acciones muy específicas de EE.UU. y Europa.
-
-Si el robot analiza un ticker que XTB no ofrece en su sección de opciones, la señal no te serviría de nada en tu día a día.
-
-Para que el software sea 100% preciso, robusto y exitoso, he actualizado el motor interno metiendo la lista oficial completa de los valores que tienen opciones Vanilla reales dentro de XTB (incluyendo gigantes europeos como ASML, SAP, LVMH o Santander, y las americanas con más liquidez en su plataforma).
-
-Aquí tienes el código definitivo para tu archivo aplicación.py:
-
-🛠️ Código Oficial con Valores de XTB (aplicación.py)
-Python
 import streamlit as st
 import pandas as pd
 import numpy as np
