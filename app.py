@@ -30,6 +30,22 @@ def enviar_alerta_telegram(mensaje):
 # =====================================================================
 # MOTOR MATEMÁTICO QUANT
 # =====================================================================
+def calcular_precio_teorico_call(S, X, T, r, sigma):
+    if T <= 0 or sigma <= 0: return max(0.0, S - X)
+    try:
+        d1 = (np.log(S / X) + (r + (sigma ** 2) / 2) * T) / (sigma * np.sqrt(T))
+        d2 = d1 - sigma * np.sqrt(T)
+        return (S * norm.cdf(d1)) - (X * np.exp(-r * T) * norm.cdf(d2))
+    except: return max(0.0, S - X)
+
+def calcular_precio_teorico_put(S, X, T, r, sigma):
+    if T <= 0 or sigma <= 0: return max(0.0, X - S)
+    try:
+        d1 = (np.log(S / X) + (r + (sigma ** 2) / 2) * T) / (sigma * np.sqrt(T))
+        d2 = d1 - sigma * np.sqrt(T)
+        return (X * np.exp(-r * T) * norm.cdf(-d2)) - (S * norm.cdf(-d1))
+    except: return max(0.0, X - S)
+
 def calcular_delta_teorica(S, X, T, r, sigma, tipo):
     if T <= 0 or sigma <= 0: return 0.5
     try:
@@ -65,6 +81,8 @@ def calcular_indicadores_y_backtest(df_historico, r_interes):
     
     exitos_bollinger = 0
     eventos_bollinger = 0
+    exitos_rsi = 0
+    eventos_rsi = 0
     
     for i in range(50, len(df) - 7):
         if df['Ancho_Banda'].iloc[i] <= df['Ancho_Banda'].rolling(window=100).quantile(0.20).iloc[i]:
@@ -75,8 +93,18 @@ def calcular_indicadores_y_backtest(df_historico, r_interes):
             if (precio_max_7d >= precio_base * 1.03) or (precio_min_7d <= precio_base * 0.97):
                 exitos_bollinger += 1
                 
+        if df['RSI'].iloc[i] <= 30 or df['RSI'].iloc[i] >= 70:
+            eventos_rsi += 1
+            precio_base = df['Close'].iloc[i]
+            precio_max_7d = df['High'].iloc[i+1:i+8].max()
+            precio_min_7d = df['Low'].iloc[i+1:i+8].min()
+            if df['RSI'].iloc[i] <= 30 and (precio_max_7d >= precio_base * 1.03): exitos_rsi += 1
+            if df['RSI'].iloc[i] >= 70 and (precio_min_7d <= precio_base * 0.97): exitos_rsi += 1
+
     prob_bollinger = (exitos_bollinger / eventos_bollinger * 100) if eventos_bollinger > 0 else 50.0
-    return precio_actual, rsi_actual, es_squeeze, vol_historica, round(prob_bollinger, 1)
+    prob_rsi = (exitos_rsi / eventos_rsi * 100) if eventos_rsi > 0 else 50.0
+    
+    return precio_actual, rsi_actual, es_squeeze, vol_historica, round(prob_bollinger, 1), round(prob_rsi, 1)
 
 # =====================================================================
 # PANEL DE CONTROL DE POSICIONES ABIERTAS (Formulario adaptado a XTB)
@@ -172,7 +200,7 @@ todos_los_activos_xtb = grandes_corporaciones + mid_small_caps + indices_materia
 # ESTRUCTURA DE 5 VENTANAS EN STREAMLIT
 pestana_top, pestana_catalogo, pestana1, pestana2, pestana3 = st.tabs([
     "👑 Las 10 Mejores Gangas",
-    "📋 Catálogo Completo Opciones XTB", # <--- NUEVA VENTANA SOLICITADA
+    "📋 Catálogo Completo Opciones XTB",
     "🏢 Grandes Corporaciones", 
     "🚀 Mid & Small Caps", 
     "🌍 Divisas, Índices y Materias"
@@ -189,17 +217,32 @@ def obtener_alertas_bloque(lista_tickers):
             df_hist = t.history(period="9mo")
             if df_hist.empty or len(df_hist) < 50: continue
             
-            S, rsi, es_squeeze, vol, p_boll = calcular_indicadores_y_backtest(df_hist, tasa_interes)
+            S, rsi, es_squeeze, vol, p_boll, p_rsi = calcular_indicadores_y_backtest(df_hist, tasa_interes)
             vencimiento_lejano = (datetime.now() + timedelta(days=40)).strftime('%Y-%m-%d')
             T = 40 / 365.0
             
             if es_squeeze:
                 tipo = "CALL" if rsi <= 50 else "PUT"
                 X = round(S * 1.03, 2) if tipo == "CALL" else round(S * 0.97, 2)
+                prima_teorica = calcular_precio_teorico_call(S, X, T, tasa_interes, vol) if tipo == "CALL" else calcular_precio_teorico_put(S, X, T, tasa_interes, vol)
                 resultados.append({
                     "Activo": ticker, "Estrategia": "Técnica (Bollinger Squeeze)", "Éxito Histórico Num": p_boll,
                     "Éxito Histórico": f"{p_boll:.1f}%", "Orden de Operación": f"Comprar {tipo} Strike {X} Vencimiento {vencimiento_lejano}",
-                    "Precio Acción": f"{S:.2f} $"
+                    "Precio Entrada (Prima)": f"{prima_teorica:.2f} $",
+                    "TAKE PROFIT SUGERIDO (+20%)": f"{prima_teorica * 1.20:.2f} $",
+                    "STOP LOSS SUGERIDO (-10%)": f"{prima_teorica * 0.90:.2f} $"
+                })
+                
+            if (rsi <= 30 or rsi >= 70):
+                tipo = "CALL" if rsi <= 30 else "PUT"
+                X = round(S * 1.02, 2) if tipo == "CALL" else round(S * 0.98, 2)
+                prima_teorica = calcular_precio_teorico_call(S, X, T, tasa_interes, vol) if tipo == "CALL" else calcular_precio_teorico_put(S, X, T, tasa_interes, vol)
+                resultados.append({
+                    "Activo": ticker, "Estrategia": "Estadística (RSI)", "Éxito Histórico Num": p_rsi,
+                    "Éxito Histórico": f"{p_rsi:.1f}%", "Orden de Operación": f"Comprar {tipo} Strike {X} Vencimiento {vencimiento_lejano}",
+                    "Precio Entrada (Prima)": f"{prima_teorica:.2f} $",
+                    "TAKE PROFIT SUGERIDO (+20%)": f"{prima_teorica * 1.20:.2f} $",
+                    "STOP LOSS SUGERIDO (-10%)": f"{prima_teorica * 0.90:.2f} $"
                 })
         except: continue
     return resultados
@@ -217,14 +260,13 @@ with pestana_top:
 
 with pestana_catalogo:
     st.subheader("📋 Catálogo Unificado Completo de Opciones Vanilla en XTB")
-    st.markdown("Esta ventana barre en un único listado la totalidad de activos disponibles en el bróker (más de 65 opciones bajo análisis simultáneo).")
     if st.button("🔍 Escanear Todo el Catálogo XTB", key="btn_catalogo_completo"):
         with st.spinner("Analizando la totalidad del ecosistema de XTB..."):
             alertas_totales = obtener_alertas_bloque(todos_los_activos_xtb)
             if alertas_totales:
                 df_catalogo = pd.DataFrame(alertas_totales).sort_values(by="Activo", ascending=True)
                 st.dataframe(df_catalogo.drop(columns=["Éxito Histórico Num"]), use_container_width=True)
-            else: st.info("☕ Sin señales en el catálogo general en este instante.")
+            else: st.info("☕ Sin señales en el catálogo general.")
 
 with pestana1:
     st.subheader("🏢 Escáner de Blue Chips e Inversiones Nobles")
