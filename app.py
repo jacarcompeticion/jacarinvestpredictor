@@ -28,23 +28,27 @@ def enviar_alerta_telegram(mensaje):
             except: pass
 
 # =====================================================================
-# MOTOR MATEMÁTICO QUANT
+# MOTOR MATEMÁTICO QUANT (CON FILTRO ANTI-NAN BLINDADO)
 # =====================================================================
 def calcular_precio_teorico_call(S, X, T, r, sigma):
     if T <= 0 or sigma <= 0: return max(0.0, S - X)
     try:
         d1 = (np.log(S / X) + (r + (sigma ** 2) / 2) * T) / (sigma * np.sqrt(T))
         d2 = d1 - sigma * np.sqrt(T)
-        return (S * norm.cdf(d1)) - (X * np.exp(-r * T) * norm.cdf(d2))
-    except: return max(0.0, S - X)
+        precio = (S * norm.cdf(d1)) - (X * np.exp(-r * T) * norm.cdf(d2))
+        return float(precio) if not np.isnan(precio) and not np.isinf(precio) else max(0.01, S - X)
+    except: 
+        return max(0.01, S - X)
 
 def calcular_precio_teorico_put(S, X, T, r, sigma):
     if T <= 0 or sigma <= 0: return max(0.0, X - S)
     try:
         d1 = (np.log(S / X) + (r + (sigma ** 2) / 2) * T) / (sigma * np.sqrt(T))
         d2 = d1 - sigma * np.sqrt(T)
-        return (X * np.exp(-r * T) * norm.cdf(-d2)) - (S * norm.cdf(-d1))
-    except: return max(0.0, X - S)
+        precio = (X * np.exp(-r * T) * norm.cdf(-d2)) - (S * norm.cdf(-d1))
+        return float(precio) if not np.isnan(precio) and not np.isinf(precio) else max(0.01, X - S)
+    except: 
+        return max(0.01, X - S)
 
 def calcular_delta_teorica(S, X, T, r, sigma, tipo):
     if T <= 0 or sigma <= 0: return 0.5
@@ -77,7 +81,7 @@ def calcular_indicadores_y_backtest(df_historico, r_interes):
     
     df['Retornos'] = df['Close'].pct_change()
     vol_historica = df['Retornos'].rolling(window=20).std().iloc[-1] * np.sqrt(252)
-    if np.isnan(vol_historica) or vol_historica <= 0: vol_historica = 0.30
+    if np.isnan(vol_historica) or vol_historica <= 0: vol_historica = 0.35
     
     exitos_bollinger = 0
     eventos_bollinger = 0
@@ -159,7 +163,7 @@ if st.session_state.posiciones:
             
             df_hist_reciente['Retornos'] = df_hist_reciente['Close'].pct_change()
             vol_actual = df_hist_reciente['Retornos'].rolling(window=20).std().iloc[-1] * np.sqrt(252)
-            if np.isnan(vol_actual) or vol_actual <= 0: vol_actual = 0.30
+            if np.isnan(vol_actual) or vol_actual <= 0: vol_actual = 0.35
             
             T_restante = 35 / 365.0
             delta_contrato = calcular_delta_teorica(p_actual_accion, pos["Strike"], T_restante, tasa_interes, vol_actual, pos["Tipo"])
@@ -217,32 +221,38 @@ def obtener_alertas_bloque(lista_tickers):
             df_hist = t.history(period="9mo")
             if df_hist.empty or len(df_hist) < 50: continue
             
-            S, rsi, es_squeeze, vol, p_boll, p_rsi = calcular_indicadores_y_backtest(df_hist, tasa_interes)
+            # Ajustar dinámicamente la tasa libre de riesgo si el activo cotiza en Europa (en euros)
+            r_local = 0.032 if ticker.endswith(".PA") else tasa_interes
+            
+            S, rsi, es_squeeze, vol, p_boll, p_rsi = calcular_indicadores_y_backtest(df_hist, r_local)
             vencimiento_lejano = (datetime.now() + timedelta(days=40)).strftime('%Y-%m-%d')
             T = 40 / 365.0
+            
+            # Forzar una divisa de texto estético según el mercado
+            divisa = "€" if ticker.endswith(".PA") else "$"
             
             if es_squeeze:
                 tipo = "CALL" if rsi <= 50 else "PUT"
                 X = round(S * 1.03, 2) if tipo == "CALL" else round(S * 0.97, 2)
-                prima_teorica = calcular_precio_teorico_call(S, X, T, tasa_interes, vol) if tipo == "CALL" else calcular_precio_teorico_put(S, X, T, tasa_interes, vol)
+                prima_teorica = calcular_precio_teorico_call(S, X, T, r_local, vol) if tipo == "CALL" else calcular_precio_teorico_put(S, X, T, r_local, vol)
                 resultados.append({
                     "Activo": ticker, "Estrategia": "Técnica (Bollinger Squeeze)", "Éxito Histórico Num": p_boll,
                     "Éxito Histórico": f"{p_boll:.1f}%", "Orden de Operación": f"Comprar {tipo} Strike {X} Vencimiento {vencimiento_lejano}",
-                    "Precio Entrada (Prima)": f"{prima_teorica:.2f} $",
-                    "TAKE PROFIT SUGERIDO (+20%)": f"{prima_teorica * 1.20:.2f} $",
-                    "STOP LOSS SUGERIDO (-10%)": f"{prima_teorica * 0.90:.2f} $"
+                    "Precio Entrada (Prima)": f"{prima_teorica:.2f} {divisa}",
+                    "TAKE PROFIT SUGERIDO (+20%)": f"{prima_teorica * 1.20:.2f} {divisa}",
+                    "STOP LOSS SUGERIDO (-10%)": f"{prima_teorica * 0.90:.2f} {divisa}"
                 })
                 
             if (rsi <= 30 or rsi >= 70):
                 tipo = "CALL" if rsi <= 30 else "PUT"
                 X = round(S * 1.02, 2) if tipo == "CALL" else round(S * 0.98, 2)
-                prima_teorica = calcular_precio_teorico_call(S, X, T, tasa_interes, vol) if tipo == "CALL" else calcular_precio_teorico_put(S, X, T, tasa_interes, vol)
+                prima_teorica = calcular_precio_teorico_call(S, X, T, r_local, vol) if tipo == "CALL" else calcular_precio_teorico_put(S, X, T, r_local, vol)
                 resultados.append({
                     "Activo": ticker, "Estrategia": "Estadística (RSI)", "Éxito Histórico Num": p_rsi,
                     "Éxito Histórico": f"{p_rsi:.1f}%", "Orden de Operación": f"Comprar {tipo} Strike {X} Vencimiento {vencimiento_lejano}",
-                    "Precio Entrada (Prima)": f"{prima_teorica:.2f} $",
-                    "TAKE PROFIT SUGERIDO (+20%)": f"{prima_teorica * 1.20:.2f} $",
-                    "STOP LOSS SUGERIDO (-10%)": f"{prima_teorica * 0.90:.2f} $"
+                    "Precio Entrada (Prima)": f"{prima_teorica:.2f} {divisa}",
+                    "TAKE PROFIT SUGERIDO (+20%)": f"{prima_teorica * 1.20:.2f} {divisa}",
+                    "STOP LOSS SUGERIDO (-10%)": f"{prima_teorica * 0.90:.2f} {divisa}"
                 })
         except: continue
     return resultados
