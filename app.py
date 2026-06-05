@@ -32,7 +32,6 @@ def enviar_alerta_telegram(mensaje):
 # =====================================================================
 def calcular_precio_teorico_call(S, X, T, r, sigma):
     if T <= 0: return max(0.01, S - X)
-    # Forzar parámetros seguros de volatilidad para evitar errores matemáticos
     sigma = max(0.10, min(float(sigma), 1.50))
     if np.isnan(sigma) or np.isinf(sigma): sigma = 0.35
     try:
@@ -65,6 +64,10 @@ def calcular_delta_teorica(S, X, T, r, sigma, tipo):
 
 def calcular_indicadores_y_backtest(df_historico, r_interes, ticker_name):
     df = df_historico.copy()
+    
+    # --- PARCHE DE SEGURIDAD CRÍTICO: Limpiar cualquier celda vacía de la API antes de calcular ---
+    df = df.ffill().bfill()
+    
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['STD20'] = df['Close'].rolling(window=20).std()
     df['Bollinger_Sup'] = df['MA20'] + (2 * df['STD20'])
@@ -77,25 +80,29 @@ def calcular_indicadores_y_backtest(df_historico, r_interes, ticker_name):
     rs = ganancia / (perdida + 1e-10)
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    precio_actual = float(df['Close'].iloc[-1])
-    rsi_actual = float(df['RSI'].iloc[-1])
-    ancho_actual = float(df['Ancho_Banda'].iloc[-1])
+    # Asegurar que el último dato sea numérico puro y no nulo
+    precio_actual = float(df['Close'].ffill().iloc[-1])
+    rsi_actual = float(df['RSI'].ffill().iloc[-1])
+    ancho_actual = float(df['Ancho_Banda'].ffill().iloc[-1])
     
-    limite_squeeze = df['Ancho_Banda'].rolling(window=100).quantile(0.20).iloc[-1]
+    # Valores de control por si fallan los indicadores iniciales
+    if np.isnan(rsi_actual): rsi_actual = 50.0
+    if np.isnan(ancho_actual): ancho_actual = 0.15
+    
+    limite_squeeze = df['Ancho_Banda'].rolling(window=100).quantile(0.20).ffill().iloc[-1]
+    if np.isnan(limite_squeeze): limite_squeeze = 0.10
     es_squeeze = ancho_actual <= limite_squeeze
     
-    # --- RED DE SEGURIDAD PARA EVITAR VOLATILIDADES NAN ---
     df['Retornos'] = df['Close'].pct_change()
     try:
         vol_historica = float(df['Retornos'].rolling(window=20).std().iloc[-1] * np.sqrt(252))
         if np.isnan(vol_historica) or np.isinf(vol_historica) or vol_historica <= 0:
             raise ValueError
     except:
-        # Asignación inteligente por sectores si falla el histórico
         if ticker_name in ["SPY", "QQQ", "IWM", "TLT", "UUP", "FXE"]: vol_historica = 0.18
         elif ticker_name in ["GLD", "SLV", "USO", "UNG"]: vol_historica = 0.28
         elif ticker_name in ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "KO", "PEP", "XOM", "PFE", "JPM", "BAC", "WMT"]: vol_historica = 0.25
-        else: vol_historica = 0.55 # Para Tech volátiles, crecimiento o Small Caps
+        else: vol_historica = 0.55
     
     exitos_bollinger = 0
     eventos_bollinger = 0
@@ -103,17 +110,19 @@ def calcular_indicadores_y_backtest(df_historico, r_interes, ticker_name):
     eventos_rsi = 0
     
     for i in range(50, len(df) - 7):
-        if df['Ancho_Banda'].iloc[i] <= df['Ancho_Banda'].rolling(window=100).quantile(0.20).iloc[i]:
-            eventos_bollinger += 1
-            precio_base = df['Close'].iloc[i]
-            if (df['High'].iloc[i+1:i+8].max() >= precio_base * 1.03) or (df['Low'].iloc[i+1:i+8].min() <= precio_base * 0.97):
-                exitos_bollinger += 1
-                
-        if df['RSI'].iloc[i] <= 30 or df['RSI'].iloc[i] >= 70:
-            eventos_rsi += 1
-            precio_base = df['Close'].iloc[i]
-            if df['RSI'].iloc[i] <= 30 and (df['High'].iloc[i+1:i+8].max() >= precio_base * 1.03): exitos_rsi += 1
-            if df['RSI'].iloc[i] >= 70 and (df['Low'].iloc[i+1:i+8].min() <= precio_base * 0.97): exitos_rsi += 1
+        try:
+            if df['Ancho_Banda'].iloc[i] <= df['Ancho_Banda'].rolling(window=100).quantile(0.20).iloc[i]:
+                eventos_bollinger += 1
+                precio_base = df['Close'].iloc[i]
+                if (df['High'].iloc[i+1:i+8].max() >= precio_base * 1.03) or (df['Low'].iloc[i+1:i+8].min() <= precio_base * 0.97):
+                    exitos_bollinger += 1
+                    
+            if df['RSI'].iloc[i] <= 30 or df['RSI'].iloc[i] >= 70:
+                eventos_rsi += 1
+                precio_base = df['Close'].iloc[i]
+                if df['RSI'].iloc[i] <= 30 and (df['High'].iloc[i+1:i+8].max() >= precio_base * 1.03): exitos_rsi += 1
+                if df['RSI'].iloc[i] >= 70 and (df['Low'].iloc[i+1:i+8].min() <= precio_base * 0.97): exitos_rsi += 1
+        except: continue
 
     prob_bollinger = (exitos_bollinger / eventos_bollinger * 100) if eventos_bollinger > 0 else 50.0
     prob_rsi = (exitos_rsi / eventos_rsi * 100) if eventos_rsi > 0 else 50.0
@@ -168,7 +177,7 @@ if st.session_state.posiciones:
     for pos in st.session_state.posiciones:
         try:
             ticker_yf = yf.Ticker(pos["Ticker"])
-            df_hist_reciente = ticker_yf.history(period="3mo")
+            df_hist_reciente = ticker_yf.history(period="3mo").ffill().bfill()
             p_actual_accion = df_hist_reciente["Close"].iloc[-1]
             
             df_hist_reciente['Retornos'] = df_hist_reciente['Close'].pct_change()
@@ -177,144 +186,3 @@ if st.session_state.posiciones:
             
             T_restante = 35 / 365.0
             delta_contrato = calcular_delta_teorica(p_actual_accion, pos["Strike"], T_restante, tasa_interes, vol_actual, pos["Tipo"])
-            cambio_accion_pct = (p_actual_accion - pos["AccionEntrada"]) / pos["AccionEntrada"]
-            
-            elasticidad = abs(delta_contrato * (p_actual_accion / max(0.01, (pos["PrimaInicialEur"] / 100))))
-            elasticidad = max(3.0, min(elasticidad, 15.0))
-            
-            if pos["Tipo"] == "CALL": rendimiento_estimado_posicion = cambio_accion_pct * elasticidad
-            else: rendimiento_estimado_posicion = -cambio_accion_pct * elasticidad
-                
-            valor_mercado_estimado_eur = pos["PrimaInicialEur"] * (1 + rendimiento_estimado_posicion)
-            valor_mercado_estimado_eur = max(0.0, round(valor_mercado_estimado_eur, 2))
-            rendimiento_final_pct = ((valor_mercado_estimado_eur - pos["PrimaInicialEur"]) / pos["PrimaInicialEur"]) * 100
-            
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric(f"{pos['Ticker']} ({pos['Tipo']}) - Strike {pos['Strike']}", f"{valor_mercado_estimado_eur} EUR", f"{rendimiento_final_pct:.2f}%")
-            col2.write(f"📥 Prima Inicial: {pos['PrimaInicialEur']} EUR")
-            col3.write(f"🟢 Objetivo TP: {pos['TP_Eur']} EUR")
-            col4.write(f"🔴 Salida SL: {pos['SL_Eur']} EUR")
-            
-            if rendimiento_final_pct >= 20.0:
-                enviar_alerta_telegram(f"🚨 *JACARINVEST: TAKE PROFIT (+20%)* 🚨\n\n{pos['Ticker']} llegó a tu objetivo. Rendimiento: {rendimiento_final_pct:.1f}%. ¡Cierra en XTB!")
-            elif rendimiento_final_pct <= -10.0:
-                enviar_alerta_telegram(f"📉 *JACARINVEST: STOP LOSS (-10%)* 📉\n\n{pos['Ticker']} tocó el límite de pérdidas. Rendimiento: {rendimiento_final_pct:.1f}%. ¡Cierra en XTB!")
-        except: continue
-    st.divider()
-
-# =====================================================================
-# MATRIZ FILTRADA Y DEPURADA: ACTIVOS REALES FIJOS EN XTB VANILLA
-# =====================================================================
-grandes_corporaciones = [
-    "AAPL", "NVDA", "TSLA", "MSFT", "V", "UPS", "PFE", "XOM", "META", "AMZN", 
-    "GOOGL", "NFLX", "DIS", "KO", "PEP", "JPM", "BAC", "WMT", "INTC", "AMD", 
-    "ASML", "SAP"
-]
-
-mid_small_caps = [
-    "DRTS", "ATEN", "ADEA", "PLTR", "SOUN", "BABA", "MARA", "RIOT", 
-    "SNAP", "PINS", "F", "GM", "AAL", "DAL"
-]
-
-indices_materias = [
-    "SPY", "QQQ", "IWM", "USO", "GLD", "SLV", "TLT", "UNG", "FXE", "UUP", 
-    "XLE", "XLF", "XLK", "XLY", "XLI"
-]
-
-todos_los_activos_xtb = grandes_corporaciones + mid_small_caps + indices_materias
-
-# ESTRUCTURA DE 5 VENTANAS
-pestana_top, pestana_catalogo, pestana1, pestana2, pestana3 = st.tabs([
-    "👑 Las 10 Mejores Gangas",
-    "📋 Catálogo Completo Opciones XTB",
-    "🏢 Grandes Corporaciones", 
-    "🚀 Mid & Small Caps", 
-    "🌍 Divisas, Índices y Materias"
-])
-
-session = requests.Session()
-session.headers.update({'User-Agent': 'Mozilla/5.0'})
-
-def obtener_alertas_bloque(lista_tickers):
-    resultados = []
-    for ticker in lista_tickers:
-        try:
-            t = yf.Ticker(ticker, session=session)
-            df_hist = t.history(period="9mo")
-            if df_hist.empty or len(df_hist) < 50: continue
-            
-            r_local = 0.032 if ticker.endswith(".PA") else tasa_interes
-            
-            S, rsi, es_squeeze, vol, p_boll, p_rsi = calcular_indicadores_y_backtest(df_hist, r_local, ticker)
-            vencimiento_lejano = (datetime.now() + timedelta(days=40)).strftime('%Y-%m-%d')
-            T = 40 / 365.0
-            
-            divisa = "€" if ticker.endswith(".PA") else "$"
-            
-            if es_squeeze:
-                tipo = "CALL" if rsi <= 50 else "PUT"
-                X = round(S * 1.03, 2) if tipo == "CALL" else round(S * 0.97, 2)
-                prima_teorica = calcular_precio_teorico_call(S, X, T, r_local, vol) if tipo == "CALL" else calcular_precio_teorico_put(S, X, T, r_local, vol)
-                resultados.append({
-                    "Activo": ticker, "Estrategia": "Técnica (Bollinger Squeeze)", "Éxito Histórico Num": p_boll,
-                    "Éxito Histórico": f"{p_boll:.1f}%", "Orden de Operación": f"Comprar {tipo} Strike {X} Vencimiento {vencimiento_lejano}",
-                    "Precio Entrada (Prima)": f"{prima_teorica:.2f} {divisa}",
-                    "TAKE PROFIT SUGERIDO (+20%)": f"{prima_teorica * 1.20:.2f} {divisa}",
-                    "STOP LOSS SUGERIDO (-10%)": f"{prima_teorica * 0.90:.2f} {divisa}"
-                })
-                
-            if (rsi <= 30 or rsi >= 70):
-                tipo = "CALL" if rsi <= 30 else "PUT"
-                X = round(S * 1.02, 2) if tipo == "CALL" else round(S * 0.98, 2)
-                prima_teorica = calcular_precio_teorico_call(S, X, T, r_local, vol) if tipo == "CALL" else calcular_precio_teorico_put(S, X, T, r_local, vol)
-                resultados.append({
-                    "Activo": ticker, "Estrategia": "Estadística (RSI)", "Éxito Histórico Num": p_rsi,
-                    "Éxito Histórico": f"{p_rsi:.1f}%", "Orden de Operación": f"Comprar {tipo} Strike {X} Vencimiento {vencimiento_lejano}",
-                    "Precio Entrada (Prima)": f"{prima_teorica:.2f} {divisa}",
-                    "TAKE PROFIT SUGERIDO (+20%)": f"{prima_teorica * 1.20:.2f} {divisa}",
-                    "STOP LOSS SUGERIDO (-10%)": f"{prima_teorica * 0.90:.2f} {divisa}"
-                })
-        except: continue
-    return resultados
-
-# --- LÓGICA DE LAS VENTANAS ---
-with pestana_top:
-    st.subheader("👑 El TOP 10 Absoluto de Opciones")
-    if st.button("🚀 Filtrar las 10 Mejores", key="btn_super_top"):
-        with st.spinner("Filtrando el Top de efectividad..."):
-            alertas_globales = obtener_alertas_bloque(todos_los_activos_xtb)
-            if alertas_globales:
-                df_top10 = pd.DataFrame(alertas_globales).sort_values(by="Éxito Histórico Num", ascending=False).head(10)
-                st.dataframe(df_top10.drop(columns=["Éxito Histórico Num"]), use_container_width=True)
-            else: st.info("☕ No se localizan ineficiencias.")
-
-with pestana_catalogo:
-    st.subheader("📋 Catálogo Unificado Completo de Opciones Vanilla en XTB")
-    if st.button("🔍 Escanear Todo el Catálogo XTB", key="btn_catalogo_completo"):
-        with st.spinner("Analizando la totalidad del ecosistema de XTB..."):
-            alertas_totales = obtener_alertas_bloque(todos_los_activos_xtb)
-            if alertas_totales:
-                df_catalogo = pd.DataFrame(alertas_totales).sort_values(by="Activo", ascending=True)
-                st.dataframe(df_catalogo.drop(columns=["Éxito Histórico Num"]), use_container_width=True)
-            else: st.info("☕ Sin señales en el catálogo general.")
-
-with pestana1:
-    st.subheader("🏢 Escáner de Blue Chips e Inversiones Nobles")
-    if st.button("🔍 Escanear Grandes Corporaciones", key="btn_grandes"):
-        res = obtener_alertas_bloque(grandes_corporaciones)
-        if res: st.dataframe(pd.DataFrame(res).drop(columns=["Éxito Histórico Num"]), use_container_width=True)
-        else: st.info("☕ No se localizan señales.")
-
-with pestana2:
-    st.subheader("🚀 Escáner de Small & Mid Caps (Contratos Baratos de Alto Impulso)")
-    if st.button("🔍 Escanear Mid & Small Caps", key="btn_small"):
-        res = obtener_alertas_bloque(mid_small_caps)
-        if res: st.dataframe(pd.DataFrame(res).drop(columns=["Éxito Histórico Num"]), use_container_width=True)
-        else: st.info("☕ No se localizan señales.")
-
-with pestana3:
-    st.subheader("🌍 Escáner de Divisas, Índices y Materias Primas")
-    if st.button("🔍 Escanear Bloque Macro", key="btn_indices"):
-        res = obtener_alertas_bloque(indices_materias)
-        if res: st.dataframe(pd.DataFrame(res).drop(columns=["Éxito Histórico Num"]), use_container_width=True)
-        else: st.info("☕ No se localizan señales.")
