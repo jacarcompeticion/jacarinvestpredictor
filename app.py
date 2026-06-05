@@ -28,25 +28,30 @@ def enviar_alerta_telegram(mensaje):
             except: pass
 
 # =====================================================================
-# MOTOR MATEMÁTICO QUANT (CON FILTRO ANTI-NAN BLINDADO)
+# MOTOR MATEMÁTICO QUANT (FILTRO ANTI-NAN BLINDADO)
 # =====================================================================
 def calcular_precio_teorico_call(S, X, T, r, sigma):
-    if T <= 0 or sigma <= 0: return max(0.0, S - X)
+    if T <= 0: return max(0.01, S - X)
+    # Forzar parámetros seguros de volatilidad para evitar errores matemáticos
+    sigma = max(0.10, min(float(sigma), 1.50))
+    if np.isnan(sigma) or np.isinf(sigma): sigma = 0.35
     try:
         d1 = (np.log(S / X) + (r + (sigma ** 2) / 2) * T) / (sigma * np.sqrt(T))
         d2 = d1 - sigma * np.sqrt(T)
         precio = (S * norm.cdf(d1)) - (X * np.exp(-r * T) * norm.cdf(d2))
-        return float(precio) if not np.isnan(precio) and not np.isinf(precio) else max(0.01, S - X)
+        return float(precio) if not np.isnan(precio) and not np.isinf(precio) and precio > 0.01 else max(0.01, S - X)
     except: 
         return max(0.01, S - X)
 
 def calcular_precio_teorico_put(S, X, T, r, sigma):
-    if T <= 0 or sigma <= 0: return max(0.0, X - S)
+    if T <= 0: return max(0.01, X - S)
+    sigma = max(0.10, min(float(sigma), 1.50))
+    if np.isnan(sigma) or np.isinf(sigma): sigma = 0.35
     try:
         d1 = (np.log(S / X) + (r + (sigma ** 2) / 2) * T) / (sigma * np.sqrt(T))
         d2 = d1 - sigma * np.sqrt(T)
         precio = (X * np.exp(-r * T) * norm.cdf(-d2)) - (S * norm.cdf(-d1))
-        return float(precio) if not np.isnan(precio) and not np.isinf(precio) else max(0.01, X - S)
+        return float(precio) if not np.isnan(precio) and not np.isinf(precio) and precio > 0.01 else max(0.01, X - S)
     except: 
         return max(0.01, X - S)
 
@@ -58,7 +63,7 @@ def calcular_delta_teorica(S, X, T, r, sigma, tipo):
         else: return float(norm.cdf(d1) - 1)
     except: return 0.5 if tipo == "CALL" else -0.5
 
-def calcular_indicadores_y_backtest(df_historico, r_interes):
+def calcular_indicadores_y_backtest(df_historico, r_interes, ticker_name):
     df = df_historico.copy()
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['STD20'] = df['Close'].rolling(window=20).std()
@@ -72,16 +77,25 @@ def calcular_indicadores_y_backtest(df_historico, r_interes):
     rs = ganancia / (perdida + 1e-10)
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    precio_actual = df['Close'].iloc[-1]
-    rsi_actual = df['RSI'].iloc[-1]
-    ancho_actual = df['Ancho_Banda'].iloc[-1]
+    precio_actual = float(df['Close'].iloc[-1])
+    rsi_actual = float(df['RSI'].iloc[-1])
+    ancho_actual = float(df['Ancho_Banda'].iloc[-1])
     
     limite_squeeze = df['Ancho_Banda'].rolling(window=100).quantile(0.20).iloc[-1]
     es_squeeze = ancho_actual <= limite_squeeze
     
+    # --- RED DE SEGURIDAD PARA EVITAR VOLATILIDADES NAN ---
     df['Retornos'] = df['Close'].pct_change()
-    vol_historica = df['Retornos'].rolling(window=20).std().iloc[-1] * np.sqrt(252)
-    if np.isnan(vol_historica) or vol_historica <= 0: vol_historica = 0.35
+    try:
+        vol_historica = float(df['Retornos'].rolling(window=20).std().iloc[-1] * np.sqrt(252))
+        if np.isnan(vol_historica) or np.isinf(vol_historica) or vol_historica <= 0:
+            raise ValueError
+    except:
+        # Asignación inteligente por sectores si falla el histórico
+        if ticker_name in ["SPY", "QQQ", "IWM", "TLT", "UUP", "FXE"]: vol_historica = 0.18
+        elif ticker_name in ["GLD", "SLV", "USO", "UNG"]: vol_historica = 0.28
+        elif ticker_name in ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "KO", "PEP", "XOM", "PFE", "JPM", "BAC", "WMT"]: vol_historica = 0.25
+        else: vol_historica = 0.55 # Para Tech volátiles, crecimiento o Small Caps
     
     exitos_bollinger = 0
     eventos_bollinger = 0
@@ -92,18 +106,14 @@ def calcular_indicadores_y_backtest(df_historico, r_interes):
         if df['Ancho_Banda'].iloc[i] <= df['Ancho_Banda'].rolling(window=100).quantile(0.20).iloc[i]:
             eventos_bollinger += 1
             precio_base = df['Close'].iloc[i]
-            precio_max_7d = df['High'].iloc[i+1:i+8].max()
-            precio_min_7d = df['Low'].iloc[i+1:i+8].min()
-            if (precio_max_7d >= precio_base * 1.03) or (precio_min_7d <= precio_base * 0.97):
+            if (df['High'].iloc[i+1:i+8].max() >= precio_base * 1.03) or (df['Low'].iloc[i+1:i+8].min() <= precio_base * 0.97):
                 exitos_bollinger += 1
                 
         if df['RSI'].iloc[i] <= 30 or df['RSI'].iloc[i] >= 70:
             eventos_rsi += 1
             precio_base = df['Close'].iloc[i]
-            precio_max_7d = df['High'].iloc[i+1:i+8].max()
-            precio_min_7d = df['Low'].iloc[i+1:i+8].min()
-            if df['RSI'].iloc[i] <= 30 and (precio_max_7d >= precio_base * 1.03): exitos_rsi += 1
-            if df['RSI'].iloc[i] >= 70 and (precio_min_7d <= precio_base * 0.97): exitos_rsi += 1
+            if df['RSI'].iloc[i] <= 30 and (df['High'].iloc[i+1:i+8].max() >= precio_base * 1.03): exitos_rsi += 1
+            if df['RSI'].iloc[i] >= 70 and (df['Low'].iloc[i+1:i+8].min() <= precio_base * 0.97): exitos_rsi += 1
 
     prob_bollinger = (exitos_bollinger / eventos_bollinger * 100) if eventos_bollinger > 0 else 50.0
     prob_rsi = (exitos_rsi / eventos_rsi * 100) if eventos_rsi > 0 else 50.0
@@ -111,11 +121,11 @@ def calcular_indicadores_y_backtest(df_historico, r_interes):
     return precio_actual, rsi_actual, es_squeeze, vol_historica, round(prob_bollinger, 1), round(prob_rsi, 1)
 
 # =====================================================================
-# PANEL DE CONTROL DE POSICIONES ABIERTAS (Formulario adaptado a XTB)
+# PANEL DE CONTROL DE POSICIONES ABIERTAS
 # =====================================================================
 st.sidebar.header("🗂️ Registrar Posición Abierta en XTB")
 with st.sidebar.form("form_posicion"):
-    ticker_activo = st.text_input("Ticker del Activo (Ej: JPM)").upper()
+    ticker_activo = st.text_input("Ticker del Activo (Ej: PFE)").upper()
     tipo_op = st.selectbox("Tipo de Opción", ["CALL", "PUT"])
     strike_op = st.number_input("Strike de la Opción ($)", value=0.0, step=0.5)
     precio_accion_ent = st.number_input("Precio Acción en Apertura ($)", value=0.0, step=0.1)
@@ -193,15 +203,27 @@ if st.session_state.posiciones:
     st.divider()
 
 # =====================================================================
-# MATRIZ OFICIAL DE OPCIONES VANILLA EN XTB
+# MATRIZ FILTRADA Y DEPURADA: ACTIVOS REALES FIJOS EN XTB VANILLA
 # =====================================================================
-grandes_corporaciones = ["AAPL", "NVDA", "TSLA", "MSFT", "V", "UPS", "PFE", "XOM", "META", "AMZN", "GOOGL", "NFLX", "DIS", "KO", "PEP", "JPM", "BAC", "WMT", "INTC", "AMD", "ASML", "SAP", "LVMH.PA", "MC.PA"]
-mid_small_caps = ["DRTS", "ATEN", "ADEA", "PLTR", "SOUN", "BABA", "MARA", "RIOT", "BBAI", "NIO", "HOOD", "LCID", "CHPT", "RIVN", "AAL", "DAL", "UAL", "SNAP", "PINS", "DKNG", "COIN", "XPEV", "LI", "F", "GM"]
-indices_materias = ["SPY", "QQQ", "IWM", "USO", "GLD", "IBIT", "SLV", "TLT", "UNG", "FXE", "UUP", "EEM", "EFA", "GDX", "XLE", "XLF", "XLK", "XLY", "XLI"]
+grandes_corporaciones = [
+    "AAPL", "NVDA", "TSLA", "MSFT", "V", "UPS", "PFE", "XOM", "META", "AMZN", 
+    "GOOGL", "NFLX", "DIS", "KO", "PEP", "JPM", "BAC", "WMT", "INTC", "AMD", 
+    "ASML", "SAP"
+]
+
+mid_small_caps = [
+    "DRTS", "ATEN", "ADEA", "PLTR", "SOUN", "BABA", "MARA", "RIOT", 
+    "SNAP", "PINS", "F", "GM", "AAL", "DAL"
+]
+
+indices_materias = [
+    "SPY", "QQQ", "IWM", "USO", "GLD", "SLV", "TLT", "UNG", "FXE", "UUP", 
+    "XLE", "XLF", "XLK", "XLY", "XLI"
+]
 
 todos_los_activos_xtb = grandes_corporaciones + mid_small_caps + indices_materias
 
-# ESTRUCTURA DE 5 VENTANAS EN STREAMLIT
+# ESTRUCTURA DE 5 VENTANAS
 pestana_top, pestana_catalogo, pestana1, pestana2, pestana3 = st.tabs([
     "👑 Las 10 Mejores Gangas",
     "📋 Catálogo Completo Opciones XTB",
@@ -221,14 +243,12 @@ def obtener_alertas_bloque(lista_tickers):
             df_hist = t.history(period="9mo")
             if df_hist.empty or len(df_hist) < 50: continue
             
-            # Ajustar dinámicamente la tasa libre de riesgo si el activo cotiza en Europa (en euros)
             r_local = 0.032 if ticker.endswith(".PA") else tasa_interes
             
-            S, rsi, es_squeeze, vol, p_boll, p_rsi = calcular_indicadores_y_backtest(df_hist, r_local)
+            S, rsi, es_squeeze, vol, p_boll, p_rsi = calcular_indicadores_y_backtest(df_hist, r_local, ticker)
             vencimiento_lejano = (datetime.now() + timedelta(days=40)).strftime('%Y-%m-%d')
             T = 40 / 365.0
             
-            # Forzar una divisa de texto estético según el mercado
             divisa = "€" if ticker.endswith(".PA") else "$"
             
             if es_squeeze:
