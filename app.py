@@ -65,7 +65,7 @@ def calcular_delta_teorica(S, X, T, r, sigma, tipo):
 def calcular_indicadores_y_backtest(df_historico, r_interes, ticker_name):
     df = df_historico.copy()
     
-    # --- PARCHE DE SEGURIDAD CRÍTICO: Limpiar cualquier celda vacía de la API antes de calcular ---
+    # Parche de seguridad para limpiar celdas vacías de la API
     df = df.ffill().bfill()
     
     df['MA20'] = df['Close'].rolling(window=20).mean()
@@ -80,12 +80,10 @@ def calcular_indicadores_y_backtest(df_historico, r_interes, ticker_name):
     rs = ganancia / (perdida + 1e-10)
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # Asegurar que el último dato sea numérico puro y no nulo
     precio_actual = float(df['Close'].ffill().iloc[-1])
     rsi_actual = float(df['RSI'].ffill().iloc[-1])
     ancho_actual = float(df['Ancho_Banda'].ffill().iloc[-1])
     
-    # Valores de control por si fallan los indicadores iniciales
     if np.isnan(rsi_actual): rsi_actual = 50.0
     if np.isnan(ancho_actual): ancho_actual = 0.15
     
@@ -155,34 +153,4 @@ if guardar_pos and ticker_activo and prima_total_eur > 0 and strike_op > 0 and p
     })
     
     mensaje_apertura = (
-        f"🚀 *JACARINVEST: POSICIÓN ABIERTA* 🚀\n\n"
-        f"🔹 *Activo:* {ticker_activo} ({tipo_op})\n"
-        f"🎯 *Strike:* {strike_op:.2f} $\n"
-        f"📈 *Acción en Entrada:* {precio_accion_ent:.2f} $\n"
-        f"💶 *Capital Invertido:* {prima_total_eur:.2f} EUR\n"
-        f"🎯 *Objetivo Take Profit (+20%):* {tp_dinero:.2f} EUR\n"
-        f"🛡️ *Límite Stop Loss (-10%):* {sl_dinero:.2f} EUR\n\n"
-        f"⚙️ _Sistema calibrado con la divisa y mesa de operaciones de XTB._"
-    )
-    enviar_alerta_telegram(mensaje_apertura)
-    st.sidebar.success(f"🟢 ¡Vigilando {ticker_activo} en EUR! Alerta enviada.")
-
-# =====================================================================
-# INTERFAZ PRINCIPAL - MONITOR DE PORTAFOLIO
-# =====================================================================
-tasa_interes = 0.045
-
-if st.session_state.posiciones:
-    st.subheader("🕵️ Monitor de Posiciones en Tiempo Real (XTB Portfolio Sync)")
-    for pos in st.session_state.posiciones:
-        try:
-            ticker_yf = yf.Ticker(pos["Ticker"])
-            df_hist_reciente = ticker_yf.history(period="3mo").ffill().bfill()
-            p_actual_accion = df_hist_reciente["Close"].iloc[-1]
-            
-            df_hist_reciente['Retornos'] = df_hist_reciente['Close'].pct_change()
-            vol_actual = df_hist_reciente['Retornos'].rolling(window=20).std().iloc[-1] * np.sqrt(252)
-            if np.isnan(vol_actual) or vol_actual <= 0: vol_actual = 0.35
-            
-            T_restante = 35 / 365.0
-            delta_contrato = calcular_delta_teorica(p_actual_accion, pos["Strike"], T_restante, tasa_interes, vol_actual, pos["Tipo"])
+        f"🚀 *JACARINVEST: POSICIÓN ABIER
