@@ -4,6 +4,7 @@ import numpy as np
 from scipy.stats import norm
 import yfinance as yf
 import requests
+import os
 from datetime import datetime, timedelta
 
 # Configuración de la plataforma web
@@ -14,10 +15,13 @@ st.set_page_config(
 )
 
 # =====================================================================
-# CONFIGURACIÓN FIJA DE TELEGRAM (CREDENCIALES AUTOMÁTICAS)
+# CONFIGURACIÓN FIJA DE TELEGRAM Y BASES DE DATOS LOCALES (.CSV)
 # =====================================================================
 TELEGRAM_BOT_TOKEN = "8236836852:AAF1ILMLRUmQI2axjyDqlRomCON7CahAJCU"
 USER_CHAT_IDS = [1296326413]
+
+FILE_ABIERTAS = "posiciones_abiertas.csv"
+FILE_HISTORICO = "historico_operaciones.csv"
 
 def enviar_alerta_telegram(mensaje):
     if TELEGRAM_BOT_TOKEN and USER_CHAT_IDS:
@@ -27,8 +31,21 @@ def enviar_alerta_telegram(mensaje):
             try: requests.post(url, json=payload)
             except: pass
 
+def cargar_datos_csv():
+    """Inicializa y carga los archivos CSV locales de forma automática"""
+    if not os.path.exists(FILE_ABIERTAS):
+        df_ab = pd.DataFrame(columns=["ID", "Ticker", "Tipo", "Strike", "AccionEntrada", "PrimaInicialEur", "TP_Eur", "SL_Eur", "FechaApertura"])
+        df_ab.to_csv(FILE_ABIERTAS, index=False)
+    if not os.path.exists(FILE_HISTORICO):
+        df_hi = pd.DataFrame(columns=["Ticker", "Tipo", "Strike", "FechaApertura", "FechaCierre", "CapitalInvertidoEur", "ResultadoNetoEur", "RendimientoPct", "Estado"])
+        df_hi.to_csv(FILE_HISTORICO, index=False)
+    
+    return pd.read_csv(FILE_ABIERTAS), pd.read_csv(FILE_HISTORICO)
+
+df_abiertas, df_historico = cargar_datos_csv()
+
 # =====================================================================
-# MOTOR MATEMÁTICO QUANT (FILTRO ANTI-NAN BLINDADO)
+# MOTOR MATEMÁTICO QUANT
 # =====================================================================
 def calcular_precio_teorico_call(S, X, T, r, sigma):
     if T <= 0: return max(0.01, S - X)
@@ -39,8 +56,7 @@ def calcular_precio_teorico_call(S, X, T, r, sigma):
         d2 = d1 - sigma * np.sqrt(T)
         precio = (S * norm.cdf(d1)) - (X * np.exp(-r * T) * norm.cdf(d2))
         return float(precio) if not np.isnan(precio) and not np.isinf(precio) and precio > 0.01 else max(0.01, S - X)
-    except: 
-        return max(0.01, S - X)
+    except: return max(0.01, S - X)
 
 def calcular_precio_teorico_put(S, X, T, r, sigma):
     if T <= 0: return max(0.01, X - S)
@@ -51,8 +67,7 @@ def calcular_precio_teorico_put(S, X, T, r, sigma):
         d2 = d1 - sigma * np.sqrt(T)
         precio = (X * np.exp(-r * T) * norm.cdf(-d2)) - (S * norm.cdf(-d1))
         return float(precio) if not np.isnan(precio) and not np.isinf(precio) and precio > 0.01 else max(0.01, X - S)
-    except: 
-        return max(0.01, X - S)
+    except: return max(0.01, X - S)
 
 def calcular_delta_teorica(S, X, T, r, sigma, tipo):
     if T <= 0 or sigma <= 0: return 0.5
@@ -62,12 +77,8 @@ def calcular_delta_teorica(S, X, T, r, sigma, tipo):
         else: return float(norm.cdf(d1) - 1)
     except: return 0.5 if tipo == "CALL" else -0.5
 
-def calcular_indicadores_y_backtest(df_historico, r_interes, ticker_name):
-    df = df_historico.copy()
-    
-    # Parche de seguridad para limpiar celdas vacías de la API
-    df = df.ffill().bfill()
-    
+def calcular_indicadores_y_backtest(df_historico_prices, r_interes, ticker_name):
+    df = df_historico_prices.copy().ffill().bfill()
     df['MA20'] = df['Close'].rolling(window=20).mean()
     df['STD20'] = df['Close'].rolling(window=20).std()
     df['Bollinger_Sup'] = df['MA20'] + (2 * df['STD20'])
@@ -94,14 +105,13 @@ def calcular_indicadores_y_backtest(df_historico, r_interes, ticker_name):
     df['Retornos'] = df['Close'].pct_change()
     try:
         vol_historica = float(df['Retornos'].rolling(window=20).std().iloc[-1] * np.sqrt(252))
-        if np.isnan(vol_historica) or np.isinf(vol_historica) or vol_historica <= 0:
-            raise ValueError
+        if np.isnan(vol_historica) or np.isinf(vol_historica) or vol_historica <= 0: raise ValueError
     except:
         if ticker_name in ["SPY", "QQQ", "IWM", "TLT", "UUP", "FXE"]: vol_historica = 0.18
         elif ticker_name in ["GLD", "SLV", "USO", "UNG"]: vol_historica = 0.28
         elif ticker_name in ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "KO", "PEP", "XOM", "PFE", "JPM", "BAC", "WMT"]: vol_historica = 0.25
         else: vol_historica = 0.55
-    
+        
     exitos_bollinger = 0
     eventos_bollinger = 0
     exitos_rsi = 0
@@ -111,15 +121,11 @@ def calcular_indicadores_y_backtest(df_historico, r_interes, ticker_name):
         try:
             if df['Ancho_Banda'].iloc[i] <= df['Ancho_Banda'].rolling(window=100).quantile(0.20).iloc[i]:
                 eventos_bollinger += 1
-                precio_base = df['Close'].iloc[i]
-                if (df['High'].iloc[i+1:i+8].max() >= precio_base * 1.03) or (df['Low'].iloc[i+1:i+8].min() <= precio_base * 0.97):
-                    exitos_bollinger += 1
-                    
+                if (df['High'].iloc[i+1:i+8].max() >= df['Close'].iloc[i] * 1.03) or (df['Low'].iloc[i+1:i+8].min() <= df['Close'].iloc[i] * 0.97): exitos_bollinger += 1
             if df['RSI'].iloc[i] <= 30 or df['RSI'].iloc[i] >= 70:
                 eventos_rsi += 1
-                precio_base = df['Close'].iloc[i]
-                if df['RSI'].iloc[i] <= 30 and (df['High'].iloc[i+1:i+8].max() >= precio_base * 1.03): exitos_rsi += 1
-                if df['RSI'].iloc[i] >= 70 and (df['Low'].iloc[i+1:i+8].min() <= precio_base * 0.97): exitos_rsi += 1
+                if df['RSI'].iloc[i] <= 30 and (df['High'].iloc[i+1:i+8].max() >= df['Close'].iloc[i] * 1.03): exitos_rsi += 1
+                if df['RSI'].iloc[i] >= 70 and (df['Low'].iloc[i+1:i+8].min() <= df['Close'].iloc[i] * 0.97): exitos_rsi += 1
         except: continue
 
     prob_bollinger = (exitos_bollinger / eventos_bollinger * 100) if eventos_bollinger > 0 else 50.0
@@ -128,7 +134,7 @@ def calcular_indicadores_y_backtest(df_historico, r_interes, ticker_name):
     return precio_actual, rsi_actual, es_squeeze, vol_historica, round(prob_bollinger, 1), round(prob_rsi, 1)
 
 # =====================================================================
-# PANEL DE CONTROL DE POSICIONES ABIERTAS
+# REGISTRO SIDEBAR DE OPERACIONES (Fijo en la interfaz)
 # =====================================================================
 st.sidebar.header("🗂️ Registrar Posición Abierta en XTB")
 with st.sidebar.form("form_posicion"):
@@ -139,91 +145,41 @@ with st.sidebar.form("form_posicion"):
     prima_total_eur = st.number_input("Prima de Apertura Total (€)", value=0.0, step=1.0)
     guardar_pos = st.form_submit_button("🚨 Registrar y Vigilar")
 
-if "posiciones" not in st.session_state:
-    st.session_state.posiciones = []
-
 if guardar_pos and ticker_activo and prima_total_eur > 0 and strike_op > 0 and precio_accion_ent > 0:
     tp_dinero = round(prima_total_eur * 1.20, 2)
     sl_dinero = round(prima_total_eur * 0.90, 2)
+    fecha_hoy = datetime.now().strftime('%Y-%m-%d %H:%M')
     
-    st.session_state.posiciones.append({
-        "Ticker": ticker_activo, "Tipo": tipo_op, "Strike": strike_op,
-        "AccionEntrada": precio_accion_ent, "PrimaInicialEur": prima_total_eur,
-        "TP_Eur": tp_dinero, "SL_Eur": sl_dinero
-    })
+    nuevo_registro = pd.DataFrame([{
+        "ID": str(int(datetime.now().timestamp())), "Ticker": ticker_activo, "Tipo": tipo_op, "Strike": strike_op,
+        "AccionEntrada": precio_accion_ent, "PrimaInicialEur": prima_total_eur, "TP_Eur": tp_dinero, "SL_Eur": sl_dinero, "FechaApertura": fecha_hoy
+    }])
+    df_abiertas = pd.concat([df_abiertas, nuevo_registro], ignore_index=False)
+    df_abiertas.to_csv(FILE_ABIERTAS, index=False)
     
     mensaje_apertura = (
         f"🚀 *JACARINVEST: POSICIÓN ABIERTA* 🚀\n\n"
-        f"🔹 *Activo:* {ticker_activo} ({tipo_op})\n"
-        f"🎯 *Strike:* {strike_op:.2f} $\n"
-        f"📈 *Acción en Entrada:* {precio_accion_ent:.2f} $\n"
+        f"🔹 *Activo:* {ticker_activo} ({tipo_op}) | *Strike:* {strike_op:.2f} $\n"
         f"💶 *Capital Invertido:* {prima_total_eur:.2f} EUR\n"
         f"🎯 *Objetivo Take Profit (+20%):* {tp_dinero:.2f} EUR\n"
-        f"🛡️ *Límite Stop Loss (-10%):* {sl_dinero:.2f} EUR\n\n"
-        f"⚙️ _Sistema calibrado con la divisa y mesa de operaciones de XTB._"
+        f"🛡️ *Límite Stop Loss (-10%):* {sl_dinero:.2f} EUR"
     )
     enviar_alerta_telegram(mensaje_apertura)
-    st.sidebar.success(f"🟢 ¡Vigilando {ticker_activo} en EUR! Alerta enviada.")
+    st.sidebar.success(f"🟢 Posición de {ticker_activo} guardada en base de datos.")
+    st.rerun()
 
 # =====================================================================
-# INTERFAZ PRINCIPAL - MONITOR DE PORTAFOLIO (CORREGIDA IDENTACIÓN)
+# INTERFAZ DE NAVEGACIÓN PRINCIPAL (5 PESTAÑAS)
 # =====================================================================
 tasa_interes = 0.045
 
-if st.session_state.posiciones:
-    st.subheader("🕵️ Monitor de Posiciones en Tiempo Real (XTB Portfolio Sync)")
-    for pos in st.session_state.posiciones:
-        try:
-            ticker_yf = yf.Ticker(pos["Ticker"])
-            df_hist_reciente = ticker_yf.history(period="3mo").ffill().bfill()
-            p_actual_accion = df_hist_reciente["Close"].iloc[-1]
-            
-            df_hist_reciente['Retornos'] = df_hist_reciente['Close'].pct_change()
-            vol_actual = df_hist_reciente['Retornos'].rolling(window=20).std().iloc[-1] * np.sqrt(252)
-            if np.isnan(vol_actual) or vol_actual <= 0: vol_actual = 0.35
-            
-            T_restante = 35 / 365.0
-            delta_contrato = calcular_delta_teorica(p_actual_accion, pos["Strike"], T_restante, tasa_interes, vol_actual, pos["Tipo"])
-            cambio_accion_pct = (p_actual_accion - pos["AccionEntrada"]) / pos["AccionEntrada"]
-            
-            elasticidad = abs(delta_contrato * (p_actual_accion / max(0.01, (pos["PrimaInicialEur"] / 100))))
-            elasticidad = max(3.0, min(elasticidad, 15.0))
-            
-            if pos["Tipo"] == "CALL": 
-                rendimiento_estimado_posicion = cambio_accion_pct * elasticidad
-            else: 
-                rendimiento_estimado_posicion = -cambio_accion_pct * elasticidad
-                
-            valor_mercado_estimado_eur = pos["PrimaInicialEur"] * (1 + rendimiento_estimado_posicion)
-            valor_mercado_estimado_eur = max(0.0, round(valor_mercado_estimado_eur, 2))
-            rendimiento_final_pct = ((valor_mercado_estimado_eur - pos["PrimaInicialEur"]) / pos["PrimaInicialEur"]) * 100
-            
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric(f"{pos['Ticker']} ({pos['Tipo']}) - Strike {pos['Strike']}", f"{valor_mercado_estimado_eur} EUR", f"{rendimiento_final_pct:.2f}%")
-            col2.write(f"📥 Prima Inicial: {pos['PrimaInicialEur']} EUR")
-            col3.write(f"🟢 Objetivo TP: {pos['TP_Eur']} EUR")
-            col4.write(f"🔴 Salida SL: {pos['SL_Eur']} EUR")
-            
-            if rendimiento_final_pct >= 20.0:
-                enviar_alerta_telegram(f"🚨 *JACARINVEST: TAKE PROFIT (+20%)* 🚨\n\n{pos['Ticker']} llegó a tu objetivo. Rendimiento: {rendimiento_final_pct:.1f}%. ¡Cierra en XTB!")
-            elif rendimiento_final_pct <= -10.0:
-                enviar_alerta_telegram(f"📉 *JACARINVEST: STOP LOSS (-10%)* 📉\n\n{pos['Ticker']} tocó el límite de pérdidas. Rendimiento: {rendimiento_final_pct:.1f}%. ¡Cierra en XTB!")
-        except: 
-            continue
-    st.divider()
-
-# =====================================================================
-# MATRIZ OFICIAL DE OPCIONES VANILLA EN XTB
-# =====================================================================
 grandes_corporaciones = ["AAPL", "NVDA", "TSLA", "MSFT", "V", "UPS", "PFE", "XOM", "META", "AMZN", "GOOGL", "NFLX", "DIS", "KO", "PEP", "JPM", "BAC", "WMT", "INTC", "AMD", "ASML", "SAP"]
 mid_small_caps = ["DRTS", "ATEN", "ADEA", "PLTR", "SOUN", "BABA", "MARA", "RIOT", "SNAP", "PINS", "F", "GM", "AAL", "DAL"]
 indices_materias = ["SPY", "QQQ", "IWM", "USO", "GLD", "SLV", "TLT", "UNG", "FXE", "UUP", "XLE", "XLF", "XLK", "XLY", "XLI"]
-
 todos_los_activos_xtb = grandes_corporaciones + mid_small_caps + indices_materias
 
-# ESTRUCTURA DE 5 VENTANAS
-pestana_top, pestana_catalogo, pestana1, pestana2, pestana3 = st.tabs([
-    "👑 Las 10 Mejores Gangas", "📋 Catálogo Completo Opciones XTB", "🏢 Grandes Corporaciones", "🚀 Mid & Small Caps", "🌍 Divisas, Índices y Materias"
+pestana_top, pestana_catalogo, pestana1, pestana2, pestana_cartera = st.tabs([
+    "👑 Las 10 Mejores Gangas", "📋 Catálogo Completo XTB", "🏢 Grandes Corporaciones", "🚀 Mid & Small Caps", "📊 Gestión de Cartera e Histórico"
 ])
 
 session = requests.Session()
@@ -236,13 +192,10 @@ def obtener_alertas_bloque(lista_tickers):
             t = yf.Ticker(ticker, session=session)
             df_hist = t.history(period="9mo")
             if df_hist.empty or len(df_hist) < 50: continue
-            
             r_local = 0.032 if ticker.endswith(".PA") else tasa_interes
-            
             S, rsi, es_squeeze, vol, p_boll, p_rsi = calcular_indicadores_y_backtest(df_hist, r_local, ticker)
             vencimiento_lejano = (datetime.now() + timedelta(days=40)).strftime('%Y-%m-%d')
             T = 40 / 365.0
-            
             divisa = "€" if ticker.endswith(".PA") else "$"
             
             if es_squeeze:
@@ -250,65 +203,159 @@ def obtener_alertas_bloque(lista_tickers):
                 X = round(S * 1.03, 2) if tipo == "CALL" else round(S * 0.97, 2)
                 prima_teorica = calcular_precio_teorico_call(S, X, T, r_local, vol) if tipo == "CALL" else calcular_precio_teorico_put(S, X, T, r_local, vol)
                 resultados.append({
-                    "Activo": ticker, "Estrategia": "Técnica (Bollinger Squeeze)", "Éxito Histórico Num": p_boll,
-                    "Éxito Histórico": f"{p_boll:.1f}%", "Orden de Operación": f"Comprar {tipo} Strike {X} Vencimiento {vencimiento_lejano}",
-                    "Precio Entrada (Prima)": f"{prima_teorica:.2f} {divisa}",
-                    "TAKE PROFIT SUGERIDO (+20%)": f"{prima_teorica * 1.20:.2f} {divisa}",
-                    "STOP LOSS SUGERIDO (-10%)": f"{prima_teorica * 0.90:.2f} {divisa}"
+                    "Activo": ticker, "Estrategia": "Técnica (Bollinger Squeeze)", "Éxito Histórico Num": p_boll, "Éxito Histórico": f"{p_boll:.1f}%",
+                    "Orden de Operación": f"Comprar {tipo} Strike {X} Vencimiento {vencimiento_lejano}", "Precio Entrada (Prima)": f"{prima_teorica:.2f} {divisa}",
+                    "TAKE PROFIT SUGERIDO (+20%)": f"{prima_teorica * 1.20:.2f} {divisa}", "STOP LOSS SUGERIDO (-10%)": f"{prima_teorica * 0.90:.2f} {divisa}"
                 })
-                
             if (rsi <= 30 or rsi >= 70):
                 tipo = "CALL" if rsi <= 30 else "PUT"
                 X = round(S * 1.02, 2) if tipo == "CALL" else round(S * 0.98, 2)
                 prima_teorica = calcular_precio_teorico_call(S, X, T, r_local, vol) if tipo == "CALL" else calcular_precio_teorico_put(S, X, T, r_local, vol)
                 resultados.append({
-                    "Activo": ticker, "Estrategia": "Estadística (RSI)", "Éxito Histórico Num": p_rsi,
-                    "Éxito Histórico": f"{p_rsi:.1f}%", "Orden de Operación": f"Comprar {tipo} Strike {X} Vencimiento {vencimiento_lejano}",
-                    "Precio Entrada (Prima)": f"{prima_teorica:.2f} {divisa}",
-                    "TAKE PROFIT SUGERIDO (+20%)": f"{prima_teorica * 1.20:.2f} {divisa}",
-                    "STOP LOSS SUGERIDO (-10%)": f"{prima_teorica * 0.90:.2f} {divisa}"
+                    "Activo": ticker, "Estrategia": "Estadística (RSI)", "Éxito Histórico Num": p_rsi, "Éxito Histórico": f"{p_rsi:.1f}%",
+                    "Orden de Operación": f"Comprar {tipo} Strike {X} Vencimiento {vencimiento_lejano}", "Precio Entrada (Prima)": f"{prima_teorica:.2f} {divisa}",
+                    "TAKE PROFIT SUGERIDO (+20%)": f"{prima_teorica * 1.20:.2f} {divisa}", "STOP LOSS SUGERIDO (-10%)": f"{prima_teorica * 0.90:.2f} {divisa}"
                 })
         except: continue
     return resultados
 
-# --- LÓGICA DE LAS VENTANAS ---
+# Lógica básica de escaneos estáticos
 with pestana_top:
     st.subheader("👑 El TOP 10 Absoluto de Opciones")
     if st.button("🚀 Filtrar las 10 Mejores", key="btn_super_top"):
-        with st.spinner("Filtrando el Top de efectividad..."):
-            alertas_globales = obtener_alertas_bloque(todos_los_activos_xtb)
-            if alertas_globales:
-                df_top10 = pd.DataFrame(alertas_globales).sort_values(by="Éxito Histórico Num", ascending=False).head(10)
-                st.dataframe(df_top10.drop(columns=["Éxito Histórico Num"]), use_container_width=True)
-            else: st.info("☕ No se localizan ineficiencias.")
-
+        with st.spinner("Procesando..."):
+            alertas = obtener_alertas_bloque(todos_los_activos_xtb)
+            if alertas: st.dataframe(pd.DataFrame(alertas).sort_values(by="Éxito Histórico Num", ascending=False).head(10).drop(columns=["Éxito Histórico Num"]), use_container_width=True)
 with pestana_catalogo:
-    st.subheader("📋 Catálogo Unificado Completo de Opciones Vanilla en XTB")
-    if st.button("🔍 Escanear Todo el Catálogo XTB", key="btn_catalogo_completo"):
-        with st.spinner("Analizando la totalidad del ecosistema de XTB..."):
-            alertas_totales = obtener_alertas_bloque(todos_los_activos_xtb)
-            if alertas_totales:
-                df_catalogo = pd.DataFrame(alertas_totales).sort_values(by="Activo", ascending=True)
-                st.dataframe(df_catalogo.drop(columns=["Éxito Histórico Num"]), use_container_width=True)
-            else: st.info("☕ Sin señales en el catálogo general.")
-
+    st.subheader("📋 Catálogo Completo Opciones XTB")
+    if st.button("🔍 Escanear Todo", key="btn_all_cat"):
+        with st.spinner("Procesando..."):
+            alertas = obtener_alertas_bloque(todos_los_activos_xtb)
+            if alertas: st.dataframe(pd.DataFrame(alertas).sort_values(by="Activo", ascending=True).drop(columns=["Éxito Histórico Num"]), use_container_width=True)
 with pestana1:
-    st.subheader("🏢 Escáner de Blue Chips e Inversiones Nobles")
-    if st.button("🔍 Escanear Grandes Corporaciones", key="btn_grandes"):
+    st.subheader("🏢 Grandes Corporaciones")
+    if st.button("🔍 Escanear Bloque Noble", key="btn_g1"):
         res = obtener_alertas_bloque(grandes_corporaciones)
         if res: st.dataframe(pd.DataFrame(res).drop(columns=["Éxito Histórico Num"]), use_container_width=True)
-        else: st.info("☕ No se localizan señales.")
-
 with pestana2:
-    st.subheader("🚀 Escáner de Small & Mid Caps (Contratos Baratos de Alto Impulso)")
-    if st.button("🔍 Escanear Mid & Small Caps", key="btn_small"):
+    st.subheader("🚀 Mid & Small Caps")
+    if st.button("🔍 Escanear Bloque Volátil", key="btn_g2"):
         res = obtener_alertas_bloque(mid_small_caps)
         if res: st.dataframe(pd.DataFrame(res).drop(columns=["Éxito Histórico Num"]), use_container_width=True)
-        else: st.info("☕ No se localizan señales.")
 
-with pestana3:
-    st.subheader("🌍 Escáner de Divisas, Índices y Materias Primas")
-    if st.button("🔍 Escanear Bloque Macro", key="btn_indices"):
-        res = obtener_alertas_bloque(indices_materias)
-        if res: st.dataframe(pd.DataFrame(res).drop(columns=["Éxito Histórico Num"]), use_container_width=True)
-        else: st.info("☕ No se localizan señales.")
+# =====================================================================
+# NUEVA 5ª VENTANA: CUADRO DE MANDOS FINANCIERO E HISTÓRICO
+# =====================================================================
+with pestana_cartera:
+    st.subheader("📊 Panel Integral de Gestión de Cartera Cuantitativa")
+    
+    # 1. CÁLCULO DE MÉTRICAS GLOBALES ACUMULADAS
+    total_invertido_historico = df_historico["CapitalInvertidoEur"].sum() if not df_historico.empty else 0.0
+    total_neto_historico = df_historico["ResultadoNetoEur"].sum() if not df_historico.empty else 0.0
+    
+    rentabilidad_global_pct = (total_neto_historico / total_invertido_historico * 100) if total_invertido_historico > 0 else 0.0
+    color_rendimiento = "normal" if total_neto_historico >= 0 else "inverse"
+    
+    col_m1, col_m2, col_m3 = st.columns(3)
+    col_m1.metric("💶 Total Capital Invertido (Histórico)", f"{total_invertido_historico:.2f} €")
+    col_m2.metric("💰 Resultado Neto Consolidado", f"{total_neto_historico:.2f} €", delta=f"{total_neto_historico:.2f} €", delta_color=color_rendimiento)
+    col_m3.metric("📈 Porcentaje Rentabilidad de la Cuenta", f"{rentabilidad_global_pct:.2f} %")
+    st.divider()
+
+    # 2. MONITOR ACTIVO EN TIEMPO REAL CON BOTÓN REPORTE TELEGRAM
+    col_t1, col_t2 = st.columns([3, 1])
+    col_t1.subheader("🕵️ Posiciones Abiertas y Supervisión de Riesgo")
+    lanzar_reporte = col_t2.button("🔄 Generar y Enviar Reporte Diario a Telegram")
+
+    reporte_texto = "📋 *REPORTING DIARIO DE CARTERA* 📋\n\n"
+    hay_posiciones_abiertas = len(df_abiertas) > 0
+
+    if hay_posiciones_abiertas:
+        for idx, row in df_abiertas.iterrows():
+            try:
+                ticker_yf = yf.Ticker(row["Ticker"])
+                df_hist_reciente = ticker_yf.history(period="3mo").ffill().bfill()
+                
+                # Recalcular griegas y métricas para este segundo de mercado
+                S_act = float(df_hist_reciente["Close"].iloc[-1])
+                r_local = 0.032 if str(row["Ticker"]).endswith(".PA") else tasa_interes
+                _, rsi_act, _, vol_act, _, _ = calcular_indicadores_y_backtest(df_hist_reciente, r_local, row["Ticker"])
+                
+                delta_c = calcular_delta_teorica(S_act, row["Strike"], 35/365.0, r_local, vol_act, row["Tipo"])
+                cambio_acc_pct = (S_act - row["AccionEntrada"]) / row["AccionEntrada"]
+                
+                elasticidad = max(3.0, min(abs(delta_c * (S_act / max(0.01, row["PrimaInicialEur"]/100))), 15.0))
+                rendimiento_est_pos = cambio_acc_pct * elasticidad if row["Tipo"] == "CALL" else -cambio_acc_pct * elasticidad
+                
+                val_mercado_eur = max(0.0, round(row["PrimaInicialEur"] * (1 + rendimiento_est_pos), 2))
+                rendimiento_pos_pct = ((val_mercado_eur - row["PrimaInicialEur"]) / row["PrimaInicialEur"]) * 100
+                
+                # REGLA 1: TRAILING PROFIT DINÁMICO (AUMENTAR TP)
+                nota_ajuste = ""
+                sugerencia_telegram = ""
+                if rendimiento_pos_pct >= 15.0 and rsi_act < 65 and row["Tipo"] == "CALL":
+                    nota_ajuste = "🔥 **Métricas Excelentes: Se sugiere aumentar TP al +40% y hacer cierre parcial del 50% en XTB.**"
+                    sugerencia_telegram = "\n⚠️ *Sugerencia:* Tendencia con fuerza alcista. Eleva TP a +40% y ejecuta un cierre parcial en XTB."
+                elif rendimiento_pos_pct >= 15.0 and rsi_act > 35 and row["Tipo"] == "PUT":
+                    nota_ajuste = "🔥 **Métricas Excelentes: Se sugiere aumentar TP al +40% y hacer cierre parcial del 50% en XTB.**"
+                    sugerencia_telegram = "\n⚠️ *Sugerencia:* Tendencia con fuerza bajista. Eleva TP a +40% y ejecuta un cierre parcial en XTB."
+                
+                # Renderizado en la Web
+                with st.expander(f"📦 {row['Ticker']} ({row['Tipo']}) — Entrada: {row['FechaApertura']}"):
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Valor de Mercado Est.", f"{val_mercado_eur:.2f} €", f"{rendimiento_pos_pct:.2f} %")
+                    c2.write(f"📥 Strike original: **{row['Strike']} $**\n\n💵 Capital Inicial: **{row['PrimaInicialEur']} €**")
+                    c3.write(f"🟢 Objetivo TP: **{row['TP_Eur']} €**\n\n🔴 Salida SL: **{row['SL_Eur']} €**")
+                    if nota_ajuste: st.markdown(nota_ajuste)
+                    
+                    # FORMULARIO EXCLUSIVO DE CIERRE PARA ESTA POSICIÓN
+                    with st.form(f"cierre_{row['ID']}"):
+                        resultado_cierre_eur = st.number_input("Dinero devuelto por XTB al cerrar (€)", value=float(val_mercado_eur), step=1.0, key=f"num_{row['ID']}")
+                        confirmar_btn = st.form_submit_button("❌ Confirmar Cierre y Pasar a Histórico")
+                        
+                        if confirmar_btn:
+                            neto_operacion = round(resultado_cierre_eur - row["PrimaInicialEur"], 2)
+                            pct_operacion = round((neto_operacion / row["PrimaInicialEur"]) * 100, 2)
+                            estado_op = "Ganada" if neto_operacion >= 0 else "Perdida"
+                            
+                            # Pasar registro al CSV del Histórico permanente
+                            nuevo_hist = pd.DataFrame([{
+                                "Ticker": row["Ticker"], "Tipo": row["Tipo"], "Strike": row["Strike"], "FechaApertura": row["FechaApertura"],
+                                "FechaCierre": datetime.now().strftime('%Y-%m-%d %H:%M'), "CapitalInvertidoEur": row["PrimaInicialEur"],
+                                "ResultadoNetoEur": neto_operacion, "RendimientoPct": pct_operacion, "Estado": estado_op
+                            }])
+                            df_historico = pd.concat([df_historico, nuevo_hist], ignore_index=True)
+                            df_historico.to_csv(FILE_HISTORICO, index=False)
+                            
+                            # Borrar del CSV de abiertas
+                            df_abiertas = df_abiertas[df_abiertas["ID"] != row["ID"]]
+                            df_abiertas.to_csv(FILE_ABIERTAS, index=False)
+                            
+                            enviar_alerta_telegram(f"✅ *JACARINVEST: POSICIÓN CERRADA*\n\nActivo: {row['Ticker']} {row['Tipo']}\n💶 Resultado: {neto_operacion:.2f} EUR ({pct_operacion}%) | {estado_op}")
+                            st.success("Posición liquidada con éxito.")
+                            st.rerun()
+
+                # Construcción del bloque de texto para el Reporte Diario
+                reporte_texto += (
+                    f"🔹 *{row['Ticker']} ({row['Tipo']})*\n"
+                    f"  • Variación: {rendimiento_pos_pct:.2f}%\n"
+                    f"  • Valor Est: {val_mercado_eur:.2f} EUR (Entrada: {row['PrimaInicialEur']} EUR)\n"
+                    f"  • RSI Actual: {rsi_act:.1f}{sugerencia_telegram}\n\n"
+                )
+            except: continue
+    else: st.info("☕ No hay posiciones abiertas registradas para vigilar.")
+
+    # Envío del reporte diario a Telegram al pulsar el botón
+    if lanzar_reporte:
+        if hay_posiciones_abiertas:
+            enviar_alerta_telegram(reporte_texto)
+            st.success("📩 Reporte de riesgo enviado correctamente a Telegram.")
+        else: st.warning("No hay posiciones abiertas para reportar.")
+
+    st.divider()
+
+    # 3. COMPONENTE VISUAL DEL DIARIO HISTÓRICO PERMANENTE
+    st.subheader("📜 Diario de Operaciones Histórico (Persistencia Local)")
+    if not df_historico.empty:
+        st.dataframe(df_historico.sort_values(by="FechaCierre", ascending=False), use_container_width=True)
+    else: st.info("📂 El histórico de operaciones cerradas está vacío actualmente.")
